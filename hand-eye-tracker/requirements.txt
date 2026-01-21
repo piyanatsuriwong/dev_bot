@@ -1,0 +1,78 @@
+# Requirements for Raspberry Pi 5 ARM64
+# ติดตั้งด้วย: pip install -r requirements.txt (ใน venv --system-site-packages)
+
+# =============================================================================
+# Core dependencies
+# =============================================================================
+pygame>=2.1.0
+opencv-contrib-python>=4.9.0
+numpy>=1.24.0,<2
+Pillow>=9.0.0
+
+# =============================================================================
+# GC9A01A Round LCD Display (SPI)
+# =============================================================================
+spidev>=3.5
+lgpio>=0.2.2.0
+
+# =============================================================================
+# Hand Tracking (MediaPipe)
+# =============================================================================
+mediapipe>=0.10.0
+
+# =============================================================================
+# Pi Camera
+# =============================================================================
+# picamera2 - ใช้ system package (ต้องสร้าง venv ด้วย --system-site-packages)
+
+# =============================================================================
+# Hardware Pin Configuration
+# =============================================================================
+#
+# GC9A01A Round LCD Display:
+#   VCC  -> Pin 1 (3.3V)
+#   GND  -> Pin 6 (GND)
+#   SCL  -> Pin 23 (GPIO 11/SCLK)
+#   SDA  -> Pin 19 (GPIO 10/MOSI)
+#   RES  -> Pin 22 (GPIO 25)
+#   DC   -> Pin 18 (GPIO 24)
+#   CS   -> Pin 24 (GPIO 8/CE0)
+#   BLK  -> Pin 16 (GPIO 23)
+#
+# Servo Motor (Camera Pan):
+#   VCC (Red)    -> Pin 2 or 4 (5V)
+#   GND (Brown)  -> Pin 9 (GND)
+#   Signal (Orange) -> Pin 12 (GPIO 18)
+#
+# Pi Camera:
+#   CSI Connector
+#
+# =============================================================================
+# Installation on Raspberry Pi 5:
+# =============================================================================
+#
+# 1. Enable SPI:
+#    sudo raspi-config -> Interface Options -> SPI -> Enable
+#
+# 2. Create venv with system packages:
+#    python3 -m venv env --system-site-packages
+#    source env/bin/activate
+#
+# 3. Install dependencies:
+#    pip install -r requirements.txt
+#
+# 4. Run:
+#    python3 main_roboeyes.py --demo    # Demo mode (no camera)
+#    python3 main_roboeyes.py           # Normal mode (with camera)
+#
+# =============================================================================
+# Gesture Controls:
+# =============================================================================
+#   Fist (0 fingers)  -> ANGRY
+#   1 finger          -> CURIOUS
+#   2 fingers         -> DEFAULT
+#   3 fingers         -> TIRED
+#   4 fingers         -> SCARY
+#   Open hand (5)     -> HAPPY + Servo follows hand
+#
+# =============================================================================

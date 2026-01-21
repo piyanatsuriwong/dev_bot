@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh piyanat@192.168.1.44 \"echo ''095398759'' | sudo -S cp /var/lib/dpkg/status /var/lib/dpkg/status.backup && echo ''095398759'' | sudo -S dpkg --configure -a\")",
+      "Bash(ssh piyanat@192.168.1.44 \"echo ''095398759'' | sudo -S cp /var/lib/dpkg/status-old /var/lib/dpkg/status\")",
+      "Bash(sshpass -p \"095398759\" ssh piyanat@192.168.1.44 \"mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys\")",
+      "Bash(ssh-copy-id:*)",
+      "Bash(ssh:*)",
+      "Bash(ssh-keygen:*)",
+      "WebFetch(domain:raspberrypicar.readthedocs.io)",
+      "Bash(scp:*)",
+      "Bash(timeout:*)",
+      "Bash(curl:*)",
+      "Bash(ping:*)",
+      "Bash(dir:*)",
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(powershell -Command \"Start-Sleep -Seconds 20\")",
+      "Bash(powershell -Command \"Start-Sleep -Seconds 25\")",
+      "Bash(copy \"D:\\\\mobile\\\\pi5\\\\Server-pi5\\\\PCA9685.py\" \"D:\\\\mobile\\\\pi5\\\\hand-eye-tracker\"\")",
+      "Bash(copy D:mobilepi5Server-pi5PCA9685.py D:mobilepi5hand-eye-tracker)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "WebFetch(domain:docs.ultralytics.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(claude mcp add:*)"
+    ]
+  }
+}
