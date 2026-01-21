@@ -1113,6 +1113,13 @@ class AICameraMode:
         # Initialize text overlay
         self.text_overlay = TextOverlay(config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
 
+        # Initialize Servo Controller for camera pan-tilt
+        self.servo = ServoController()
+        if self.servo.enabled:
+            print("Servo: Pan-Tilt enabled (PCA9685)")
+        else:
+            print("Servo: Disabled")
+
         # Voice Control disabled for now (enable if microphone available)
         self.voice_thread = None
         # if VOICE_AVAILABLE:
@@ -1221,6 +1228,12 @@ class AICameraMode:
                     self.robo.eyeLxNext = eye_x
                     self.robo.eyeLyNext = eye_y
 
+                    # Move servo to track hand (pan-tilt camera)
+                    if self.servo.enabled:
+                        # Track hand position with both servos
+                        # hand_x, hand_y are already in range -1 to 1
+                        self.servo.track_hand(hand_x, hand_y, smoothing=0.15, debug=False)
+
             # Update RoboEyes
             self.robo.update()
 
@@ -1300,6 +1313,8 @@ class AICameraMode:
             self.hand_tracker.release()
         if self.yolo_tracker:
             self.yolo_tracker.cleanup()
+        if self.servo:
+            self.servo.cleanup()
         if self.gc9a01a:
             self.gc9a01a.cleanup()
         pygame.quit()
