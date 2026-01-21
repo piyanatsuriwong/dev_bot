@@ -1020,24 +1020,20 @@ class DemoMode:
 
 class AICameraMode:
     """
-    AI Camera Mode - Combines hand tracking and object detection
-    
-    Modes:
-    - TRACK mode: Use hand tracking (MediaPipe/OpenCV) for eye tracking
-    - DETECT mode: Use IMX500 YOLO for object detection
+    AI Camera Mode - Hand tracking + YOLO detection
 
-    Voice Commands:
-    - "ตรวจจับ" / "detect" - Switch to object detection (IMX500)
-    - "ติดตาม" / "track" - Switch to hand tracking
-    - "ซ่อน" / "hide" - Hide detection text
-    - "แสดง" / "show" - Show detection text
-    - Plus all mood commands (มีความสุข, โกรธ, etc.)
+    Modes:
+    - TRACK: Hand tracking with USB webcam (default)
+    - DETECT: YOLO object detection with IMX500
+
+    Keyboard:
+    - D: Switch to DETECT mode (YOLO)
+    - T: Switch to TRACK mode (Hand)
     """
 
     def __init__(self, use_mediapipe=True, yolo_confidence=0.5):
         self.use_mediapipe = use_mediapipe
         self.yolo_confidence = yolo_confidence
-        self.current_mode = "TRACK"  # Start in TRACK mode (hand tracking)
 
         # Initialize Pygame
         pygame.init()
@@ -1049,7 +1045,7 @@ class AICameraMode:
 
             # Create HDMI window for camera view
             self.camera_screen = pygame.display.set_mode((640, 480))
-            pygame.display.set_caption("AI Camera Mode - Hand Tracking / YOLO")
+            pygame.display.set_caption("AI Camera Mode - YOLO Detection")
             print("Camera Display: 640x480 on HDMI")
         else:
             self.screen = pygame.display.set_mode((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
@@ -1089,51 +1085,51 @@ class AICameraMode:
         self.robo.set_auto_blinker(ON, 3, 2)
         self.robo.set_idle_mode(OFF)
 
-        # Initialize Hand Tracker (for TRACK mode)
+        # Current mode: TRACK (hand) or DETECT (YOLO)
+        self.current_mode = "TRACK"
+
+        # Initialize Hand Tracker (USB webcam) for TRACK mode
+        self.hand_tracker = None
         if use_mediapipe and MEDIAPIPE_AVAILABLE:
             self.hand_tracker = HandTrackerMediaPipe(camera_id=0)
-            print("Hand Tracking: MediaPipe")
+            print("Hand Tracking: MediaPipe (USB webcam)")
         else:
             self.hand_tracker = HandTrackerOpenCV(camera_id=0)
-            print("Hand Tracking: OpenCV")
+            print("Hand Tracking: OpenCV (USB webcam)")
 
-        # Initialize YOLO tracker (for DETECT mode)
+        # Initialize YOLO tracker (IMX500) for DETECT mode - optional
         self.yolo_tracker = None
-        if YOLO_AVAILABLE:
-            self.yolo_tracker = create_yolo_tracker(
-                confidence_threshold=self.yolo_confidence,
-                frame_rate=30
-            )
-            self.yolo_tracker.start()
-            # Start in DETECT mode (we'll use hand tracker initially)
-            self.yolo_tracker.set_mode(YoloMode.DETECT)
-            print("YOLO: Started (IMX500)")
-        else:
-            print("YOLO: Not available!")
+        # Disable YOLO for now - enable when needed
+        # if YOLO_AVAILABLE:
+        #     self.yolo_tracker = create_yolo_tracker(
+        #         confidence_threshold=self.yolo_confidence,
+        #         frame_rate=30
+        #     )
+        #     self.yolo_tracker.start()
+        #     self.yolo_tracker.set_mode(YoloMode.DETECT)
+        #     print("YOLO: Started (IMX500)")
+        print("YOLO: Disabled (use hand tracking only)")
 
         # Initialize text overlay
         self.text_overlay = TextOverlay(config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
 
-        # Initialize Voice Control
+        # Voice Control disabled for now (enable if microphone available)
         self.voice_thread = None
-        if VOICE_AVAILABLE:
-            self.voice_thread = VoiceThread(self.on_voice_command)
-            self.voice_thread.start()
-            print("Voice Control: Started")
+        # if VOICE_AVAILABLE:
+        #     self.voice_thread = VoiceThread(self.on_voice_command)
+        #     self.voice_thread.start()
+        #     print("Voice Control: Started")
+        print("Voice Control: Disabled")
 
         self.running = True
         self.robo.mood = DEFAULT
 
     def on_voice_command(self, text):
-        """Handle voice commands for mode switching and mood"""
-        # Check mode switching commands
-        if "ตรวจจับ" in text or "detect" in text.lower():
-            self.current_mode = "DETECT"
-            print(f"  >> Mode: DETECT (YOLO IMX500)")
-            return
-        elif "ติดตาม" in text or "track" in text.lower() or "มือ" in text:
-            self.current_mode = "TRACK"
-            print(f"  >> Mode: TRACK (Hand Tracking)")
+        """Handle voice commands for YOLO mode and mood"""
+        # First check YOLO commands (mode switching, target change, show/hide)
+        if self.yolo_tracker and self.yolo_tracker.process_voice_command(text):
+            mode_text = self.yolo_tracker.get_mode_text()
+            print(f"  >> YOLO: {mode_text}")
             return
 
         # Then check mood commands
@@ -1172,19 +1168,11 @@ class AICameraMode:
 
     def run(self):
         print("=" * 50)
-        print("  AI Camera Mode (Hand Tracking + YOLO)")
-        print("=" * 50)
-        print("Voice Commands:")
-        print("  Mode: ตรวจจับ/detect (YOLO) | ติดตาม/track (Hand)")
-        print("  Mood: happy / angry / tired / scared / normal")
+        print("  Hand Tracking Mode (USB Webcam)")
         print("=" * 50)
         print("Keyboard: ESC=Quit, SPACE=Random mood")
-        print("          D=Detect mode (YOLO), T=Track mode (Hand)")
         print("=" * 50)
 
-        detected_objects = []
-        yolo_update_interval = 0.2  # Update YOLO text every 200ms
-        last_yolo_update = 0
         display_update_interval = 0.05  # Update GC9A01A at 20 FPS max
         last_display_update = 0
         hdmi_update_interval = 0.033  # Update HDMI at 30 FPS
@@ -1213,16 +1201,9 @@ class AICameraMode:
                         mood = random.choice(moods)
                         self.robo.mood = mood
                         print(f"Mood: {mood}")
-                    elif event.key == pygame.K_d:
-                        self.current_mode = "DETECT"
-                        print(f"Mode: DETECT (YOLO)")
-                    elif event.key == pygame.K_t:
-                        self.current_mode = "TRACK"
-                        print(f"Mode: TRACK (Hand)")
 
-            # Update tracking based on current mode
-            if self.current_mode == "TRACK":
-                # Use hand tracking
+            # Update hand tracking
+            if self.hand_tracker:
                 self.hand_tracker.update()
                 hand_x, hand_y = self.hand_tracker.get_normalized_position()
 
@@ -1240,30 +1221,6 @@ class AICameraMode:
                     self.robo.eyeLxNext = eye_x
                     self.robo.eyeLyNext = eye_y
 
-                detected_objects = []  # Clear YOLO detections
-
-            else:  # DETECT mode
-                # Use YOLO detection
-                if self.yolo_tracker:
-                    if current_time - last_yolo_update > yolo_update_interval:
-                        detected_objects = self.yolo_tracker.get_detection_text(max_items=3)
-                        last_yolo_update = current_time
-
-                    # Update eye position based on YOLO tracking
-                    yolo_x, yolo_y = self.yolo_tracker.get_normalized_position()
-                    if yolo_x != 0 or yolo_y != 0:
-                        max_x = self.robo.get_screen_constraint_X()
-                        max_y = self.robo.get_screen_constraint_Y()
-
-                        eye_x = int((1 - (yolo_x + 1) / 2) * max_x)
-                        eye_y = int(((yolo_y + 1) / 2) * max_y)
-
-                        eye_x = max(0, min(max_x, eye_x))
-                        eye_y = max(0, min(max_y, eye_y))
-
-                        self.robo.eyeLxNext = eye_x
-                        self.robo.eyeLyNext = eye_y
-
             # Update RoboEyes
             self.robo.update()
 
@@ -1271,27 +1228,20 @@ class AICameraMode:
             if self.gc9a01a and current_time - last_display_update > display_update_interval:
                 last_display_update = current_time
 
-                # Prepare text lines based on mode
-                display_texts = []
-                display_texts.append(f"Mode: {self.current_mode}")
-                
-                if self.current_mode == "DETECT" and detected_objects:
-                    display_texts.extend(detected_objects[:2])
-                elif self.current_mode == "TRACK" and self.hand_tracker.hand_detected:
+                # Prepare text lines
+                display_texts = ["TRACK: Hand"]
+                if self.hand_tracker and self.hand_tracker.hand_detected:
                     gesture = getattr(self.hand_tracker, 'gesture', 'unknown')
-                    display_texts.append(f"Hand: {gesture}")
+                    display_texts.append(f"{gesture}")
 
                 # Only recreate text surface if content changed
                 if display_texts != cached_texts:
                     cached_texts = display_texts.copy()
-                    if display_texts:
-                        cached_text_surface = self.text_overlay.create_text_surface(
-                            display_texts,
-                            bg_color=(0, 0, 0, 180),
-                            text_color=(0, 255, 255)
-                        )
-                    else:
-                        cached_text_surface = None
+                    cached_text_surface = self.text_overlay.create_text_surface(
+                        display_texts,
+                        bg_color=(0, 0, 0, 180),
+                        text_color=(0, 255, 255)
+                    )
 
                 # Draw to GC9A01A
                 if cached_text_surface:
@@ -1301,53 +1251,42 @@ class AICameraMode:
                     self.gc9a01a.draw_from_surface(self.screen)
 
             # Draw camera view on HDMI (throttled to 30 FPS)
-            if self.camera_screen:
+            if self.camera_screen and self.hand_tracker:
                 if current_time - last_hdmi_update > hdmi_update_interval:
                     last_hdmi_update = current_time
 
-                    # Get frame based on current mode
-                    frame = None
-                    if self.current_mode == "TRACK":
-                        frame = self.hand_tracker.latest_frame
-                        if frame is not None:
-                            # Convert BGR to RGB
-                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    else:  # DETECT mode
-                        if self.yolo_tracker:
-                            frame = self.yolo_tracker.latest_frame
-                    
+                    # Clear screen first
+                    self.camera_screen.fill((0, 0, 0))
+
+                    frame = self.hand_tracker.latest_frame
                     if frame is not None:
-                        # Resize if needed
-                        if frame.shape[0] != 480 or frame.shape[1] != 640:
-                            frame = cv2.resize(frame, (640, 480))
-                        frame_surface = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
-                        self.camera_screen.blit(frame_surface, (0, 0))
+                        try:
+                            # Convert BGR to RGB for pygame
+                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            if frame_rgb.shape[0] != 480 or frame_rgb.shape[1] != 640:
+                                frame_rgb = cv2.resize(frame_rgb, (640, 480))
+                            frame_surface = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
+                            self.camera_screen.blit(frame_surface, (0, 0))
+                        except Exception as e:
+                            err_surface = hdmi_font.render(f"Frame error: {e}", True, (255, 0, 0))
+                            self.camera_screen.blit(err_surface, (10, 200))
 
-                        # Mode
-                        mode_surface = hdmi_font.render(f"Mode: {self.current_mode}", True, (0, 255, 255))
-                        self.camera_screen.blit(mode_surface, (10, 10))
+                    # Show status
+                    mode_surface = hdmi_font.render("Mode: TRACK (Hand)", True, (0, 255, 255))
+                    self.camera_screen.blit(mode_surface, (10, 10))
 
-                        # FPS (show based on mode)
-                        if self.current_mode == "DETECT" and self.yolo_tracker:
-                            fps_surface = hdmi_font.render(f"FPS: {self.yolo_tracker.fps}", True, (0, 255, 0))
-                            self.camera_screen.blit(fps_surface, (10, 50))
-                        else:
-                            fps_surface = hdmi_font.render(f"Hand Tracking", True, (0, 255, 0))
-                            self.camera_screen.blit(fps_surface, (10, 50))
+                    if self.hand_tracker.hand_detected:
+                        gesture = getattr(self.hand_tracker, 'gesture', 'unknown')
+                        finger_count = getattr(self.hand_tracker, 'finger_count', 0)
+                        hand_text = f"Gesture: {gesture} ({finger_count} fingers)"
+                        hand_surface = hdmi_font.render(hand_text, True, (0, 255, 0))
+                        self.camera_screen.blit(hand_surface, (10, 50))
+                    else:
+                        no_hand = hdmi_font.render("No hand detected", True, (255, 255, 0))
+                        self.camera_screen.blit(no_hand, (10, 50))
 
-                        # Info based on mode
-                        if self.current_mode == "DETECT" and detected_objects:
-                            det_text = f"Detected: {', '.join(detected_objects)}"
-                            det_surface = hdmi_font.render(det_text, True, (255, 255, 0))
-                            self.camera_screen.blit(det_surface, (10, 90))
-                        elif self.current_mode == "TRACK" and self.hand_tracker.hand_detected:
-                            gesture = getattr(self.hand_tracker, 'gesture', 'unknown')
-                            finger_count = getattr(self.hand_tracker, 'finger_count', 0)
-                            hand_text = f"Gesture: {gesture} ({finger_count} fingers)"
-                            hand_surface = hdmi_font.render(hand_text, True, (255, 255, 0))
-                            self.camera_screen.blit(hand_surface, (10, 90))
-
-                        pygame.display.flip()
+                    # Always flip display
+                    pygame.display.flip()
 
             # Limit main loop to 30 FPS to reduce CPU
             self.clock.tick(30)
@@ -1372,7 +1311,7 @@ def main():
     parser.add_argument('--demo', action='store_true',
                         help='Run in demo mode (no camera)')
     parser.add_argument('--ai-camera', action='store_true',
-                        help='AI Camera mode: TRACK=Hand tracking, DETECT=YOLO (IMX500)')
+                        help='AI Camera mode: Uses IMX500 YOLO only (no USB webcam)')
     parser.add_argument('--no-mediapipe', action='store_true',
                         help='Use OpenCV instead of MediaPipe')
     parser.add_argument('--camera', type=int, default=0,
@@ -1390,7 +1329,7 @@ def main():
     if args.demo:
         app = DemoMode()
     elif args.ai_camera:
-        # AI Camera mode - Hand tracking (TRACK) + YOLO (DETECT)
+        # AI Camera mode - Hand tracking with USB webcam
         app = AICameraMode(
             use_mediapipe=not args.no_mediapipe,
             yolo_confidence=args.yolo_confidence

@@ -138,7 +138,12 @@ class YoloTracker:
             print(f"Model loaded! Classes: {len(self.model.labels)}")
 
             print("Initializing AI Camera...")
-            self.device = AiCamera(frame_rate=self.frame_rate)
+            # Try camera num=0 first, if fails try num=1 (when multiple cameras)
+            try:
+                self.device = AiCamera(frame_rate=self.frame_rate, num=0)
+            except Exception as e0:
+                print(f"Camera 0 failed: {e0}, trying camera 1...")
+                self.device = AiCamera(frame_rate=self.frame_rate, num=1)
 
             print("Deploying model to IMX500...")
             print("(First time may take 1-2 minutes for firmware upload)")

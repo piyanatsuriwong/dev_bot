@@ -35,13 +35,13 @@ class PiCamera:
     def _init_picamera2(self):
         """Initialize picamera2"""
         try:
-            self.picam2 = Picamera2()
+            self.picam2 = Picamera2(camera_num=self.camera_id)
             config = self.picam2.create_preview_configuration(
                 main={"size": (self.width, self.height), "format": "RGB888"}
             )
             self.picam2.configure(config)
             self.picam2.start()
-            print(f"PiCamera2 initialized: {self.width}x{self.height}")
+            print(f"PiCamera2 initialized: camera {self.camera_id} @ {self.width}x{self.height}")
         except Exception as e:
             print(f"PiCamera2 init failed: {e}, falling back to OpenCV")
             self.use_picamera2 = False
