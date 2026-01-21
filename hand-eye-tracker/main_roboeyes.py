@@ -15,9 +15,11 @@ import numpy as np
 import sys
 import random
 import time
+import gc
 import threading
 import subprocess
 import os
+import signal
 import shutil
 from PIL import Image, ImageDraw, ImageFont
 
@@ -1017,6 +1019,57 @@ class DemoMode:
             self.gc9a01a.cleanup()
         pygame.quit()
 
+def force_clear_camera(device_path="/dev/video0"):
+    """
+    ตรวจสอบว่ามีใครแย่งใช้กล้องอยู่ไหม
+    - ถ้าเป็นคนอื่น -> สั่ง Kill ทันที
+    - ถ้าเป็นตัวเอง -> สั่ง Garbage Collection เพื่อบังคับคืนค่า
+    
+    Args:
+        device_path: Path to camera device (default: /dev/video0)
+    """
+    print(f"   - Checking camera blockers on {device_path}...")
+    
+    # 1. ลองใช้คำสั่ง fuser หาว่าใครใช้กล้องอยู่
+    try:
+        # ดึง PID ของคนที่ใช้กล้อง (ต้องลง fuser: sudo apt install psmisc)
+        # ถ้าไม่มี fuser อาจจะข้ามขั้นตอนนี้ไป
+        result = subprocess.check_output(
+            f"fuser {device_path} 2>/dev/null", 
+            shell=True, 
+            stderr=subprocess.DEVNULL
+        )
+        pids = [int(p) for p in result.decode().strip().split()]
+        
+        my_pid = os.getpid()
+        
+        for pid in pids:
+            if pid != my_pid:
+                print(f"   !!! Killing zombie process {pid} blocking camera...")
+                try:
+                    os.kill(pid, signal.SIGKILL)  # ฆ่า Process อื่นทิ้งทันที
+                    print(f"   [SUCCESS] Killed process {pid}")
+                except ProcessLookupError:
+                    print(f"   [INFO] Process {pid} already terminated")
+                except PermissionError:
+                    print(f"   [WARNING] No permission to kill process {pid}")
+                except Exception as e:
+                    print(f"   [WARNING] Error killing process {pid}: {e}")
+            else:
+                print("   (Camera is held by this application. Running internal GC...)")
+                
+    except subprocess.CalledProcessError:
+        # ไม่มีใครใช้กล้อง หรือไม่มีคำสั่ง fuser
+        print("   (No processes using camera or fuser not available)")
+    except Exception as e:
+        # Error อื่นๆ (เช่น fuser ไม่มี)
+        print(f"   (Could not check camera usage: {e})")
+
+    # 2. บังคับ Internal Clean (เหมือนที่ทำก่อนหน้านี้)
+    collected = gc.collect()
+    if collected > 0:
+        print(f"   - GC collected {collected} objects")
+
 
 class AICameraMode:
     """
@@ -1133,7 +1186,71 @@ class AICameraMode:
 
     def on_voice_command(self, text):
         """Handle voice commands for YOLO mode and mood"""
-        # First check YOLO commands (mode switching, target change, show/hide)
+        text_lower = text.lower()
+        
+        # Check for main mode switching commands (TRACK vs DETECT)
+        if "ตรวจจับ" in text or "detect" in text_lower:
+            # Switch to DETECT mode (YOLO)
+            if self.current_mode != "DETECT":
+                print("\n[Mode Switch] Switching to DETECT (YOLO) via voice...")
+                # Cleanup existing YOLO tracker if any
+                if self.yolo_tracker is not None:
+                    print("   - Cleaning up existing tracker...")
+                    try:
+                        self.yolo_tracker.cleanup()
+                    except Exception as e:
+                        print(f"   ! Cleanup warning: {e}")
+                    self.yolo_tracker = None
+                    gc.collect()
+                    time.sleep(3.0)  # Wait for device to fully release
+                
+                self.current_mode = "DETECT"
+                print("   - Initializing IMX500...")
+                
+                # Initialize YOLO if available
+                if YOLO_AVAILABLE:
+                    try:
+                        self.yolo_tracker = create_yolo_tracker(
+                            confidence_threshold=self.yolo_confidence,
+                            frame_rate=30
+                        )
+                        if self.yolo_tracker and self.yolo_tracker.device:
+                            self.yolo_tracker.start()
+                            self.yolo_tracker.set_mode(YoloMode.DETECT)
+                            print("   [SUCCESS] YOLO Started (IMX500)")
+                        else:
+                            raise Exception("Device is None after init")
+                    except Exception as e:
+                        print(f"   [ERROR] Failed to start YOLO: {e}")
+                        self.yolo_tracker = None
+                        self.current_mode = "TRACK"
+                else:
+                    print("   [ERROR] YOLO not available")
+                    self.current_mode = "TRACK"
+            return
+        
+        if ("ติดตามมือ" in text or "track hand" in text_lower or 
+            ("ติดตาม" in text and "มือ" in text) or
+            (self.current_mode == "DETECT" and ("มือ" in text or "hand" in text_lower))):
+            # Switch to TRACK mode (Hand)
+            if self.current_mode != "TRACK":
+                print("\n[Mode Switch] Switching to TRACK (Hand) via voice...")
+                # Cleanup YOLO tracker when switching away from DETECT mode
+                if self.yolo_tracker is not None:
+                    print("   - Cleaning up YOLO tracker...")
+                    try:
+                        self.yolo_tracker.cleanup()
+                    except Exception as e:
+                        print(f"   ! Cleanup warning: {e}")
+                    self.yolo_tracker = None
+                    gc.collect()
+                    time.sleep(1.0)
+                
+                self.current_mode = "TRACK"
+                print("   [SUCCESS] Switched to TRACK mode")
+            return
+        
+        # Then check YOLO sub-commands (mode switching within YOLO, target change, show/hide)
         if self.yolo_tracker and self.yolo_tracker.process_voice_command(text):
             mode_text = self.yolo_tracker.get_mode_text()
             print(f"  >> YOLO: {mode_text}")
@@ -1177,7 +1294,7 @@ class AICameraMode:
         print("=" * 50)
         print("  Hand Tracking Mode (USB Webcam)")
         print("=" * 50)
-        print("Keyboard: ESC=Quit, SPACE=Random mood")
+        print("Keyboard: ESC=Quit, SPACE=Random mood, D=DETECT mode, T=TRACK mode")
         print("=" * 50)
 
         display_update_interval = 0.05  # Update GC9A01A at 20 FPS max
@@ -1208,31 +1325,165 @@ class AICameraMode:
                         mood = random.choice(moods)
                         self.robo.mood = mood
                         print(f"Mood: {mood}")
+                    elif event.key == pygame.K_d:
+                        # === Switch to DETECT mode (YOLO) ===
+                        if self.current_mode != "DETECT":
+                            print("\n[Mode Switch] Switching to DETECT (YOLO)...")
+                            
+                            # 1. CLEANUP: ล้าง Tracker เก่าแบบหมดจด
+                            if self.yolo_tracker is not None:
+                                print("   - Cleaning up existing tracker...")
+                                try:
+                                    self.yolo_tracker.cleanup()
+                                except Exception as e:
+                                    print(f"   ! Cleanup warning: {e}")
+                                
+                                self.yolo_tracker = None
+                            
+                            # 2. เรียกใช้ฟังก์ชัน FORCE CLEAR ที่สร้างใหม่
+                            # IMX500 อยู่ที่ /dev/video0 หรือ video4 (Pi 5)
+                            # ลองทั้งสองตัวเพื่อความชัวร์
+                            force_clear_camera("/dev/video0")
+                            force_clear_camera("/dev/video4")
+                            
+                            print("   - Waiting for device release...")
+                            time.sleep(2.0)  # รอ hardware นิดนึง
+                            
+                            self.current_mode = "DETECT"
+                            
+                            # 3. INITIALIZE: สร้าง Tracker ใหม่
+                            if YOLO_AVAILABLE:
+                                try:
+                                    print("   - Initializing IMX500...")
+                                    self.yolo_tracker = create_yolo_tracker(
+                                        confidence_threshold=self.yolo_confidence,
+                                        frame_rate=30
+                                    )
+                                    # เช็คว่าสร้าง device สำเร็จไหม
+                                    if self.yolo_tracker and self.yolo_tracker.device:
+                                        self.yolo_tracker.start()
+                                        self.yolo_tracker.set_mode(YoloMode.DETECT)
+                                        print("   [SUCCESS] YOLO Started")
+                                    else:
+                                        raise Exception("Device is None after init")
+                                        
+                                except Exception as e:
+                                    print(f"   [ERROR] Failed to start YOLO: {e}")
+                                    print("   ! Retrying in 5 seconds (device may need more time to release)...")
+                                    # Retry Logic - Cleanup more thoroughly
+                                    if self.yolo_tracker:
+                                        try: 
+                                            self.yolo_tracker.cleanup()
+                                        except Exception as cleanup_err:
+                                            print(f"   ! Cleanup error: {cleanup_err}")
+                                    self.yolo_tracker = None
+                                    # Force garbage collection
+                                    collected = gc.collect()
+                                    if collected > 0:
+                                        print(f"   - GC collected {collected} objects")
+                                    # Wait longer for device to fully release
+                                    time.sleep(5.0)  # เพิ่ม delay เป็น 5 วินาที
+                                    
+                                    try:
+                                        print("   - Retrying IMX500 initialization...")
+                                        self.yolo_tracker = create_yolo_tracker(
+                                            confidence_threshold=self.yolo_confidence,
+                                            frame_rate=30
+                                        )
+                                        # เช็คว่าสร้าง device สำเร็จไหม
+                                        if self.yolo_tracker and self.yolo_tracker.device:
+                                            if self.yolo_tracker.start():
+                                                self.yolo_tracker.set_mode(YoloMode.DETECT)
+                                                print("   [SUCCESS] YOLO Started (Retry)")
+                                            else:
+                                                raise Exception("start() returned False")
+                                        else:
+                                            raise Exception("Device is None after retry init")
+                                    except Exception as e2:
+                                        print(f"   [FATAL] Retry failed: {e2}")
+                                        if self.yolo_tracker:
+                                            try: self.yolo_tracker.cleanup()
+                                            except: pass
+                                        self.yolo_tracker = None
+                                        self.current_mode = "TRACK" # Fallback กลับไปโหมดมือ
+                            else:
+                                print("   [ERROR] YOLO not available")
+                                self.current_mode = "TRACK"
+                    elif event.key == pygame.K_t:
+                        # === Switch to TRACK mode (Hand) ===
+                        if self.current_mode != "TRACK":
+                            print("\n[Mode Switch] Switching to TRACK (Hand)...")
+                            
+                            # Cleanup YOLO เพื่อคืนกล้องให้ระบบ
+                            if self.yolo_tracker is not None:
+                                print("   - Cleaning up YOLO tracker...")
+                                try:
+                                    self.yolo_tracker.cleanup()
+                                except Exception as e:
+                                    print(f"   ! Cleanup warning: {e}")
+                                
+                                self.yolo_tracker = None
+                                gc.collect() # สำคัญมาก
+                                time.sleep(1.0)
+                            
+                            self.current_mode = "TRACK"
+                            print("   [SUCCESS] Switched to TRACK mode")
 
-            # Update hand tracking
-            if self.hand_tracker:
-                self.hand_tracker.update()
-                hand_x, hand_y = self.hand_tracker.get_normalized_position()
+            # Update tracking based on current mode
+            hand_x, hand_y = 0, 0
+            yolo_x, yolo_y = 0, 0
+            
+            if self.current_mode == "TRACK":
+                # TRACK mode: Use hand tracking
+                if self.hand_tracker:
+                    self.hand_tracker.update()
+                    hand_x, hand_y = self.hand_tracker.get_normalized_position()
 
-                if self.hand_tracker.hand_detected:
-                    max_x = self.robo.get_screen_constraint_X()
-                    max_y = self.robo.get_screen_constraint_Y()
+                    if self.hand_tracker.hand_detected:
+                        max_x = self.robo.get_screen_constraint_X()
+                        max_y = self.robo.get_screen_constraint_Y()
 
-                    # Invert X for natural tracking
-                    eye_x = int((1 - (hand_x + 1) / 2) * max_x)
-                    eye_y = int(((hand_y + 1) / 2) * max_y)
+                        # Invert X for natural tracking
+                        eye_x = int((1 - (hand_x + 1) / 2) * max_x)
+                        eye_y = int(((hand_y + 1) / 2) * max_y)
 
-                    eye_x = max(0, min(max_x, eye_x))
-                    eye_y = max(0, min(max_y, eye_y))
+                        eye_x = max(0, min(max_x, eye_x))
+                        eye_y = max(0, min(max_y, eye_y))
 
-                    self.robo.eyeLxNext = eye_x
-                    self.robo.eyeLyNext = eye_y
+                        self.robo.eyeLxNext = eye_x
+                        self.robo.eyeLyNext = eye_y
 
-                    # Move servo to track hand (pan-tilt camera)
-                    if self.servo.enabled:
-                        # Track hand position with both servos
-                        # hand_x, hand_y are already in range -1 to 1
-                        self.servo.track_hand(hand_x, hand_y, smoothing=0.15, debug=False)
+                        # Move servo to track hand (pan-tilt camera)
+                        if self.servo.enabled:
+                            # Track hand position with both servos
+                            # hand_x, hand_y are already in range -1 to 1
+                            self.servo.track_hand(hand_x, hand_y, smoothing=0.15, debug=False)
+            
+            elif self.current_mode == "DETECT":
+                # DETECT mode: Use YOLO object detection
+                if self.yolo_tracker and self.yolo_tracker.running:
+                    try:
+                        yolo_x, yolo_y = self.yolo_tracker.get_normalized_position()
+                        if yolo_x != 0 or yolo_y != 0:
+                            max_x = self.robo.get_screen_constraint_X()
+                            max_y = self.robo.get_screen_constraint_Y()
+
+                            eye_x = int((1 - (yolo_x + 1) / 2) * max_x)
+                            eye_y = int(((yolo_y + 1) / 2) * max_y)
+
+                            eye_x = max(0, min(max_x, eye_x))
+                            eye_y = max(0, min(max_y, eye_y))
+
+                            self.robo.eyeLxNext = eye_x
+                            self.robo.eyeLyNext = eye_y
+
+                            # Move servo to track object (pan-tilt camera)
+                            if self.servo.enabled:
+                                self.servo.track_hand(yolo_x, yolo_y, smoothing=0.15, debug=False)
+                    except Exception as e:
+                        print(f"YOLO tracking error: {e}")
+                        # Fallback to TRACK mode if YOLO fails
+                        self.current_mode = "TRACK"
 
             # Update RoboEyes
             self.robo.update()
@@ -1241,11 +1492,25 @@ class AICameraMode:
             if self.gc9a01a and current_time - last_display_update > display_update_interval:
                 last_display_update = current_time
 
-                # Prepare text lines
-                display_texts = ["TRACK: Hand"]
-                if self.hand_tracker and self.hand_tracker.hand_detected:
-                    gesture = getattr(self.hand_tracker, 'gesture', 'unknown')
-                    display_texts.append(f"{gesture}")
+                # Prepare text lines based on current mode
+                if self.current_mode == "TRACK":
+                    display_texts = ["TRACK: Hand"]
+                    if self.hand_tracker and self.hand_tracker.hand_detected:
+                        gesture = getattr(self.hand_tracker, 'gesture', 'unknown')
+                        display_texts.append(f"{gesture}")
+                elif self.current_mode == "DETECT":
+                    display_texts = ["DETECT: YOLO"]
+                    if self.yolo_tracker and self.yolo_tracker.running:
+                        try:
+                            detected_objects = self.yolo_tracker.get_detection_text(max_items=2)
+                            if detected_objects:
+                                display_texts.extend(detected_objects)
+                        except Exception:
+                            display_texts.append("Error")
+                    else:
+                        display_texts.append("Not available")
+                else:
+                    display_texts = [f"MODE: {self.current_mode}"]
 
                 # Only recreate text surface if content changed
                 if display_texts != cached_texts:
@@ -1264,14 +1529,31 @@ class AICameraMode:
                     self.gc9a01a.draw_from_surface(self.screen)
 
             # Draw camera view on HDMI (throttled to 30 FPS)
-            if self.camera_screen and self.hand_tracker:
+            if self.camera_screen:
                 if current_time - last_hdmi_update > hdmi_update_interval:
                     last_hdmi_update = current_time
 
                     # Clear screen first
                     self.camera_screen.fill((0, 0, 0))
 
-                    frame = self.hand_tracker.latest_frame
+                    # Show frame based on current mode
+                    frame = None
+                    if self.current_mode == "TRACK" and self.hand_tracker:
+                        frame = self.hand_tracker.latest_frame
+                    elif self.current_mode == "DETECT" and self.yolo_tracker:
+                        # Only get frame if YOLO tracker is actually running
+                        if self.yolo_tracker.running:
+                            try:
+                                frame = self.yolo_tracker.latest_frame
+                            except Exception as e:
+                                # If YOLO fails, fallback to hand tracker frame
+                                if self.hand_tracker:
+                                    frame = self.hand_tracker.latest_frame
+                        else:
+                            # YOLO not running, use hand tracker frame
+                            if self.hand_tracker:
+                                frame = self.hand_tracker.latest_frame
+                    
                     if frame is not None:
                         try:
                             # Convert BGR to RGB for pygame
@@ -1284,19 +1566,45 @@ class AICameraMode:
                             err_surface = hdmi_font.render(f"Frame error: {e}", True, (255, 0, 0))
                             self.camera_screen.blit(err_surface, (10, 200))
 
-                    # Show status
-                    mode_surface = hdmi_font.render("Mode: TRACK (Hand)", True, (0, 255, 255))
+                    # Show status based on current mode
+                    mode_text = f"Mode: {self.current_mode}"
+                    if self.current_mode == "TRACK":
+                        mode_text += " (Hand)"
+                    elif self.current_mode == "DETECT":
+                        mode_text += " (YOLO)"
+                    
+                    mode_surface = hdmi_font.render(mode_text, True, (0, 255, 255))
                     self.camera_screen.blit(mode_surface, (10, 10))
 
-                    if self.hand_tracker.hand_detected:
-                        gesture = getattr(self.hand_tracker, 'gesture', 'unknown')
-                        finger_count = getattr(self.hand_tracker, 'finger_count', 0)
-                        hand_text = f"Gesture: {gesture} ({finger_count} fingers)"
-                        hand_surface = hdmi_font.render(hand_text, True, (0, 255, 0))
-                        self.camera_screen.blit(hand_surface, (10, 50))
-                    else:
-                        no_hand = hdmi_font.render("No hand detected", True, (255, 255, 0))
-                        self.camera_screen.blit(no_hand, (10, 50))
+                    # Show tracking info based on mode
+                    if self.current_mode == "TRACK" and self.hand_tracker:
+                        if self.hand_tracker.hand_detected:
+                            gesture = getattr(self.hand_tracker, 'gesture', 'unknown')
+                            finger_count = getattr(self.hand_tracker, 'finger_count', 0)
+                            hand_text = f"Gesture: {gesture} ({finger_count} fingers)"
+                            hand_surface = hdmi_font.render(hand_text, True, (0, 255, 0))
+                            self.camera_screen.blit(hand_surface, (10, 50))
+                        else:
+                            no_hand = hdmi_font.render("No hand detected", True, (255, 255, 0))
+                            self.camera_screen.blit(no_hand, (10, 50))
+                    elif self.current_mode == "DETECT":
+                        if self.yolo_tracker and self.yolo_tracker.running:
+                            try:
+                                detected_objects = self.yolo_tracker.get_detection_text(max_items=3)
+                                if detected_objects:
+                                    yolo_text = f"Objects: {', '.join(detected_objects)}"
+                                    yolo_surface = hdmi_font.render(yolo_text, True, (0, 255, 0))
+                                    self.camera_screen.blit(yolo_surface, (10, 50))
+                                else:
+                                    no_obj = hdmi_font.render("No objects detected", True, (255, 255, 0))
+                                    self.camera_screen.blit(no_obj, (10, 50))
+                            except Exception as e:
+                                error_text = f"YOLO error: {str(e)[:30]}"
+                                error_surface = hdmi_font.render(error_text, True, (255, 0, 0))
+                                self.camera_screen.blit(error_surface, (10, 50))
+                        else:
+                            no_yolo = hdmi_font.render("YOLO not available", True, (255, 255, 0))
+                            self.camera_screen.blit(no_yolo, (10, 50))
 
                     # Always flip display
                     pygame.display.flip()

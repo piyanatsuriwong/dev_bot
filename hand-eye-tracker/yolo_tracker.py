@@ -10,6 +10,8 @@ Modes:
 
 import threading
 import time
+import gc
+import weakref
 from enum import Enum
 
 # Try to import modlib (AI Camera library)
@@ -127,8 +129,35 @@ class YoloTracker:
         self._on_mode_change = None
         self._on_detection = None
 
+        # Register finalizer as fallback cleanup (runs when object is garbage collected)
+        # This is a safety net, but explicit cleanup() is preferred
+        # Note: We pass 'self' so finalizer can access self.device when it runs
+        self._finalizer = weakref.finalize(self, self._finalize_cleanup, weakref.ref(self))
+
         if YOLO_AVAILABLE:
             self._init_camera()
+    
+    @staticmethod
+    def _finalize_cleanup(self_ref):
+        """
+        Finalizer callback - fallback cleanup when object is garbage collected
+        This is a safety net, but explicit cleanup() is always preferred
+        """
+        try:
+            # Try to get the object reference (may be None if already collected)
+            self = self_ref() if self_ref else None
+            if self is not None and hasattr(self, 'device'):
+                device = self.device
+                if device is not None:
+                    try:
+                        if hasattr(device, 'close'):
+                            device.close()
+                        elif hasattr(device, '__exit__'):
+                            device.__exit__(None, None, None)
+                    except Exception:
+                        pass  # Ignore errors in finalizer
+        except Exception:
+            pass  # Ignore all errors in finalizer
 
     def _init_camera(self):
         """Initialize AI Camera and YOLO model"""
@@ -138,22 +167,97 @@ class YoloTracker:
             print(f"Model loaded! Classes: {len(self.model.labels)}")
 
             print("Initializing AI Camera...")
+            # Wait a bit to ensure previous device is fully released
+            # This helps when switching modes quickly
+            time.sleep(1.0)
+            
             # Try camera num=0 first, if fails try num=1 (when multiple cameras)
-            try:
-                self.device = AiCamera(frame_rate=self.frame_rate, num=0)
-            except Exception as e0:
-                print(f"Camera 0 failed: {e0}, trying camera 1...")
-                self.device = AiCamera(frame_rate=self.frame_rate, num=1)
+            device_initialized = False
+            max_retries = 3
+            retry_delay = 2.0
+            
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        print(f"   - Retry attempt {attempt + 1}/{max_retries}...")
+                        time.sleep(retry_delay)
+                    
+                    self.device = AiCamera(frame_rate=self.frame_rate, num=0)
+                    device_initialized = True
+                    break
+                except Exception as e0:
+                    if attempt < max_retries - 1:
+                        print(f"   - Camera 0 failed (attempt {attempt + 1}): {e0}")
+                        # Cleanup and retry
+                        if self.device:
+                            try:
+                                if hasattr(self.device, 'close'):
+                                    self.device.close()
+                                elif hasattr(self.device, '__exit__'):
+                                    self.device.__exit__(None, None, None)
+                            except:
+                                pass
+                            self.device = None
+                        gc.collect()
+                    else:
+                        # Last attempt failed, try camera 1
+                        print(f"Camera 0 failed after {max_retries} attempts: {e0}, trying camera 1...")
+                        try:
+                            self.device = AiCamera(frame_rate=self.frame_rate, num=1)
+                            device_initialized = True
+                        except Exception as e1:
+                            print(f"Camera 1 also failed: {e1}")
+                            raise e1
+
+            if not device_initialized:
+                self.device = None
+                return
 
             print("Deploying model to IMX500...")
             print("(First time may take 1-2 minutes for firmware upload)")
-            self.device.deploy(self.model)
+            try:
+                self.device.deploy(self.model)
+            except Exception as deploy_error:
+                # If deploy fails, cleanup device immediately and thoroughly
+                print(f"Deploy failed: {deploy_error}")
+                device_ref = self.device
+                self.device = None  # Clear reference first
+                
+                try:
+                    if device_ref is not None:
+                        if hasattr(device_ref, 'close'):
+                            device_ref.close()
+                            print("   - Device closed via close()")
+                        elif hasattr(device_ref, '__exit__'):
+                            device_ref.__exit__(None, None, None)
+                            print("   - Device closed via __exit__()")
+                except Exception as close_err:
+                    print(f"   ! Error closing device: {close_err}")
+                
+                # Force garbage collection to release resources
+                collected = gc.collect()
+                if collected > 0:
+                    print(f"   - GC collected {collected} objects")
+                
+                # Give OS time to release device resources
+                # IMX500 may need more time to fully release
+                print("   - Waiting for device to fully release...")
+                time.sleep(2.0)
+                
+                raise deploy_error
 
             self.annotator = Annotator()
             print("YOLO ready!")
 
         except Exception as e:
             print(f"YOLO init error: {e}")
+            # Ensure device is cleared
+            if self.device is not None:
+                try:
+                    if hasattr(self.device, 'close'):
+                        self.device.close()
+                except:
+                    pass
             self.device = None
 
     def start(self):
@@ -169,9 +273,49 @@ class YoloTracker:
 
     def stop(self):
         """Stop detection thread"""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
+        if self._running:
+            print("YOLO: Stopping detection thread...")
+            self._running = False
+            if self._thread:
+                self._thread.join(timeout=3.0)
+                if self._thread.is_alive():
+                    print("YOLO: Warning - thread did not stop in time")
+                else:
+                    print("YOLO: Thread stopped")
+    
+    def _cleanup_device(self):
+        """Cleanup AI Camera device resources - Best practices for resource cleanup"""
+        try:
+            if self.device is not None:
+                device_ref = self.device
+                
+                # Step 1: Try explicit cleanup methods (context manager pattern)
+                try:
+                    if hasattr(device_ref, 'close'):
+                        device_ref.close()
+                        print("YOLO: Device closed via close()")
+                    elif hasattr(device_ref, '__exit__'):
+                        # Use context manager exit (most reliable)
+                        device_ref.__exit__(None, None, None)
+                        print("YOLO: Device closed via __exit__()")
+                except Exception as close_error:
+                    print(f"YOLO: Error closing device: {close_error}")
+                
+                # Step 2: Clear reference to break reference cycles
+                self.device = None
+                
+                # Step 3: Force garbage collection to break cycles and finalize objects
+                # This helps ensure file handles and device resources are released
+                collected = gc.collect()
+                if collected > 0:
+                    print(f"YOLO: GC collected {collected} objects")
+                
+                # Step 4: Give OS time to release device resources
+                # Camera devices need time for kernel to release file descriptors
+                time.sleep(1.0)
+                print("YOLO: Device cleaned up")
+        except Exception as e:
+            print(f"YOLO cleanup warning: {e}")
 
     def _detection_loop(self):
         """Main detection loop (runs in thread) - Optimized like test_yolo_imx500.py"""
@@ -307,6 +451,11 @@ class YoloTracker:
     def fps(self):
         """Get current FPS"""
         return self._fps
+
+    @property
+    def running(self):
+        """Check if tracker is running"""
+        return self._running and self.device is not None
 
     @property
     def mode(self):
@@ -468,8 +617,47 @@ class YoloTracker:
         return False
 
     def cleanup(self):
-        """Cleanup resources"""
+        """
+        Cleanup resources - Comprehensive cleanup following best practices
+        
+        Steps:
+        1. Stop detection thread (exits context manager)
+        2. Wait for thread to fully exit
+        3. Cleanup device explicitly
+        4. Clear all references
+        5. Force garbage collection to break cycles
+        6. Clear cached data
+        """
+        print("YOLO: Cleaning up...")
+        
+        # Step 1: Stop thread first (this will exit the context manager in _detection_loop)
         self.stop()
+        
+        # Step 2: Wait for thread to fully exit and context manager to close
+        time.sleep(0.5)
+        
+        # Step 3: Cleanup device explicitly
+        self._cleanup_device()
+        
+        # Step 4: Clear all object references to break reference cycles
+        self.model = None
+        self.annotator = None
+        self.stream = None
+        
+        # Step 5: Clear cached data (thread-safe)
+        with self._lock:
+            self._detections = []
+            self._latest_frame = None
+            self._tracked_position = None
+        self._cached_position = (0, 0)
+        self._cached_labels = []
+        
+        # Step 6: Final garbage collection to ensure all cycles are broken
+        collected = gc.collect()
+        if collected > 0:
+            print(f"YOLO: Final GC collected {collected} objects")
+        
+        print("YOLO: Cleanup complete")
 
 
 class DummyYoloTracker:
