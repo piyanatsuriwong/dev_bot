@@ -1,0 +1,11 @@
+nul
+*USERPROFILE*
+
+# Claude files
+.claude
+
+# SSH Keys
+%USERPROFILE%.sshid_ed25519_pi5
+%USERPROFILE%.sshid_ed25519_pi5.pub
+*.ssh*
+id_ed25519*
