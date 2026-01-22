@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Hand-Eye Tracker with RoboEyes for GC9A01A Round LCD Display
-Raspberry Pi 5 with 240x240 round display
+Hand-Eye Tracker with RoboEyes for ST7735S / GC9A01A Display
+Raspberry Pi 5
 
-Uses the RoboEyes library for animated robot eyes
-Supports YOLO object detection with IMX500 AI Camera
+Dual Camera Logic:
+- Mode 1: Hand Tracking (Webcam)
+- Mode 2: Object Detection (AI Camera)
 """
 
 # -*- coding: utf-8 -*-
@@ -32,12 +33,10 @@ except ImportError:
     print("Warning: psutil not available - using fallback process management")
 
 # Monkey patch shutil.which to force SpeechRecognition to use WAV
-# This prevents "FLAC conversion utility not available" error
 original_which = shutil.which
 def mock_which(cmd, mode=os.F_OK | os.X_OK, path=None):
-    # Aggressively block flac
     if "flac" in str(cmd).lower():
-        print(f"DEBUG: Blocked access to FLAC ({cmd})")
+        # print(f"DEBUG: Blocked access to FLAC ({cmd})")
         return None
     return original_which(cmd, mode, path)
 shutil.which = mock_which
@@ -47,23 +46,24 @@ from roboeyes import *
 from pi_camera import PiCamera
 from servo_controller import ServoController
 
+# Try to import Picamera2 for secondary view
+try:
+    from picamera2 import Picamera2
+    PICAM2_AVAILABLE = True
+except ImportError:
+    PICAM2_AVAILABLE = False
+    print("Warning: Picamera2 not available")
+
 try:
     import speech_recognition as sr
-    # Extra safety: Force FLAC converter to be None within the library if possible
-    # (Though patching shutil.which usually suffices)
-    
-    VOICE_AVAILABLE = True
-    print("Voice Control: Available")
+    VOICE_AVAILABLE = False # Force disabled as requested
+    # print("Voice Control: Available")
 except ImportError:
     VOICE_AVAILABLE = False
     print("Voice Control: Not available (install SpeechRecognition)")
 
-SOUND_ENABLED = True  # Set to True to enable robot voice
-
-# Wall-E style sound files path
+SOUND_ENABLED = True
 SOUND_PATH = "/home/piyanat/hand-eye-tracker/assets/sounds/"
-
-# Mood-specific Wall-E sounds (empty = no sound)
 MOOD_SOUNDS = {
     "HAPPY": "Voicy_WALL-E 4.mp3",
     "ANGRY": "",
@@ -75,38 +75,21 @@ MOOD_SOUNDS = {
 }
 
 def play_robot_sound(mood=None, speed=1.0):
-    """Play Wall-E style sound based on mood"""
     if not SOUND_ENABLED:
         return
     def _play():
         try:
-            # Get sound file for mood
             sound_file = MOOD_SOUNDS.get(mood, "")
             if not sound_file:
-                return  # No sound for this mood
+                return
             full_path = SOUND_PATH + sound_file
-
             if os.path.exists(full_path):
                 subprocess.call(f'ffplay -nodisp -autoexit -loglevel quiet "{full_path}"', shell=True)
         except Exception as e:
-            print(f"Sound Error: {e}")
-    # Run in background thread to not block
+            pass
     threading.Thread(target=_play, daemon=True).start()
 
 if VOICE_AVAILABLE:
-    class LinuxMicrophone(sr.AudioSource):
-        def __init__(self, device_index=None, sample_rate=16000, chunk_size=1024):
-            self.device_index = device_index
-            self.SAMPLE_RATE = sample_rate
-            self.CHUNK = chunk_size
-            self.WIDTH = 2
-        
-        def __enter__(self):
-            return self
-            
-        def __exit__(self, exc_type, exc_value, traceback):
-            pass
-
     class VoiceThread(threading.Thread):
         def __init__(self, callback):
             threading.Thread.__init__(self)
@@ -117,11 +100,8 @@ if VOICE_AVAILABLE:
         def run(self):
             while self.running:
                 try:
-                    print("Voice: Recording via arecord...")
-                    # Record 3 seconds of audio to a WAV file using system 'arecord'
-                    # Using Mono (c 1) 16kHz (r 16000) S16_LE
+                    # print("Voice: Recording via arecord...")
                     filename = "/tmp/voice_cmd.wav"
-                    # -D plughw:2,0 = Webcam
                     cmd = f"arecord -D plughw:2,0 -d 3 -f S16_LE -c 1 -r 16000 -t wav -q {filename}"
                     subprocess.call(cmd, shell=True)
                     
@@ -129,53 +109,38 @@ if VOICE_AVAILABLE:
                         with sr.AudioFile(filename) as source:
                             audio = self.recognizer.record(source)
                             try:
-                                # Use Thai language (th-TH)
                                 text = self.recognizer.recognize_google(audio, language="th-TH")
-                                print("=" * 50)
-                                print(f"  ได้ยิน: '{text}'")
-                                print("=" * 50)
+                                print(f"  > Voice: '{text}'")
                                 self.callback(text)
                             except sr.UnknownValueError:
-                                print("  (ไม่ได้ยินเสียงพูด)")
-                            except sr.RequestError as e:
-                                print(f"API Error: {e}")
+                                pass
                             except Exception as e:
-                                # Catch flac error specifically if it still leaks
-                                if "flac" in str(e).lower():
-                                    print("Voice Warn: FLAC error still occurred (ignoring)")
-                                else:
-                                    print(f"Voice Error: {e}")
-                    else:
-                         print("Voice Warn: Recording failed or empty")
+                                pass
                 except Exception as e:
-                    print(f"Voice Thread Error: {e}")
                     time.sleep(1)
 
         def stop(self):
             self.running = False
 
-
-# Import display driver
+# Import display driver based on config
 if config.DISPLAY_MODE == "gc9a01a":
     from gc9a01a_display import create_display, RPI_AVAILABLE
+elif config.DISPLAY_MODE == "st7735s":
+    from st7735_display import create_display, RPI_AVAILABLE
 else:
     RPI_AVAILABLE = False
 
-# Try import MediaPipe
 try:
     import mediapipe as mp
     MEDIAPIPE_AVAILABLE = True
     mp_hands = mp.solutions.hands
     mp_drawing = mp.solutions.drawing_utils
-    print("MediaPipe: Available")
 except ImportError:
     MEDIAPIPE_AVAILABLE = False
     print("MediaPipe: Not available - using OpenCV fallback")
 
-# Import YOLO tracker
 try:
     from yolo_tracker import create_yolo_tracker, YOLO_AVAILABLE, YoloMode
-    print(f"YOLO Tracker: {'Available' if YOLO_AVAILABLE else 'Not available'}")
 except ImportError:
     YOLO_AVAILABLE = False
     YoloMode = None
@@ -183,33 +148,29 @@ except ImportError:
 
 
 class TextOverlay:
-    """Helper class to render text overlay on GC9A01A display using pygame"""
+    """Helper class to render text overlay on display using pygame"""
 
-    def __init__(self, width=240, height=240):
+    def __init__(self, width=160, height=128):
         self.width = width
         self.height = height
-        self.font_size = 16
+        # Adaptive font size based on display type
+        if width == 128:  # ST7735 (128x160 portrait)
+            self.font_size = 12  # Smaller font for ST7735
+        elif width == 160 and height == 128:  # ST7735 (160x128 landscape)
+            self.font_size = 12
+        else:  # GC9A01A (240x240)
+            self.font_size = 14
         self.font = None
         self._init_font()
 
     def _init_font(self):
         """Initialize pygame font"""
         pygame.font.init()
-        # Use default pygame font (fast and reliable)
+        # Use default pygame font
         self.font = pygame.font.Font(None, self.font_size)
 
-    def create_text_surface(self, texts, bg_color=(0, 0, 0, 180), text_color=(0, 255, 255)):
-        """
-        Create a pygame surface with text overlay
-
-        Args:
-            texts: List of strings to display
-            bg_color: Background color (RGBA) - alpha used for transparency effect
-            text_color: Text color (RGB)
-
-        Returns:
-            pygame.Surface with text
-        """
+    def create_text_surface(self, texts, bg_color=(0, 0, 0, 150), text_color=(0, 255, 255)):
+        """Create a pygame surface with text overlay"""
         if not texts:
             return None
 
@@ -217,12 +178,13 @@ class TextOverlay:
         surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
 
         # Calculate text area at bottom of screen
-        padding = 6
-        line_height = self.font_size + 2
+        padding = 2 if self.width == 128 else 4  # Smaller padding for ST7735
+        margin_bottom = 1 if self.width == 128 else 2
+        line_height = self.font_size + 2 if self.width == 128 else self.font_size + 4
         total_height = len(texts) * line_height + padding * 2
 
         # Draw semi-transparent background at bottom
-        y_start = self.height - total_height
+        y_start = self.height - total_height - margin_bottom
         bg_rect = pygame.Rect(0, y_start, self.width, total_height)
         pygame.draw.rect(surface, bg_color, bg_rect)
 
@@ -237,45 +199,26 @@ class TextOverlay:
         return surface
 
     def blend_with_eyes(self, eye_surface, text_surface):
-        """
-        Blend text overlay with eye surface
-
-        Args:
-            eye_surface: pygame.Surface with robot eyes
-            text_surface: pygame.Surface with text overlay
-
-        Returns:
-            Combined pygame.Surface
-        """
+        """Blend text overlay with eye surface"""
         if text_surface is None:
             return eye_surface
-
-        # Create a copy
         result = eye_surface.copy()
-
-        # Blit text surface with alpha
         result.blit(text_surface, (0, 0))
-
         return result
 
 
 class HandTrackerMediaPipe:
-    """Hand tracking with MediaPipe - Enhanced with finger counting"""
-
-    # MediaPipe hand landmark indices
+    """Hand tracking with MediaPipe"""
     WRIST = 0
     THUMB_TIP = 4
-    INDEX_TIP = 8
-    MIDDLE_TIP = 12
-    RING_TIP = 16
-    PINKY_TIP = 20
-
-    # Finger tip IDs
+    INDEX_FINGER_TIP = 8  # Track index finger tip instead of palm
+    MIDDLE_FINGER_TIP = 12
     TIP_IDS = [4, 8, 12, 16, 20]
 
     def __init__(self, camera_id=0):
-        self.cap = PiCamera(camera_id, width=640, height=480, fps=30)
-
+        print("   [INFO] Initializing MediaPipe Hand Tracker...")
+        # Use 1280x720 to capture full FOV of IMX708 (16:9 sensor)
+        self.cap = PiCamera(camera_id, width=1280, height=720, fps=30)
         self.hands = mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=1,
@@ -283,7 +226,6 @@ class HandTrackerMediaPipe:
             min_detection_confidence=0.7,
             min_tracking_confidence=0.5
         )
-
         self.hand_x = 0.5
         self.hand_y = 0.5
         self.hand_detected = False
@@ -294,7 +236,6 @@ class HandTrackerMediaPipe:
         self.landmarks_list = []
 
     def _get_landmarks_list(self, hand_landmarks, frame_shape):
-        """Convert landmarks to pixel coordinates"""
         h, w, _ = frame_shape
         landmarks = []
         for id, lm in enumerate(hand_landmarks.landmark):
@@ -303,56 +244,31 @@ class HandTrackerMediaPipe:
         return landmarks
 
     def _count_fingers(self, landmarks, handedness="Right"):
-        """Count raised fingers using MediaPipe landmarks"""
-        if len(landmarks) < 21:
-            return 0
-
+        if len(landmarks) < 21: return 0
         fingers = []
-
-        # Thumb - check x position (different for left/right hand)
         if handedness == "Right":
-            # Right hand: thumb tip should be left of thumb IP
-            if landmarks[self.THUMB_TIP][1] < landmarks[self.THUMB_TIP - 1][1]:
-                fingers.append(1)
-            else:
-                fingers.append(0)
+            if landmarks[self.THUMB_TIP][1] < landmarks[self.THUMB_TIP - 1][1]: fingers.append(1)
+            else: fingers.append(0)
         else:
-            # Left hand: thumb tip should be right of thumb IP
-            if landmarks[self.THUMB_TIP][1] > landmarks[self.THUMB_TIP - 1][1]:
-                fingers.append(1)
-            else:
-                fingers.append(0)
-
-        # Other 4 fingers - check if tip is above PIP joint (y is smaller = higher)
+            if landmarks[self.THUMB_TIP][1] > landmarks[self.THUMB_TIP - 1][1]: fingers.append(1)
+            else: fingers.append(0)
         for tip_id in [8, 12, 16, 20]:
-            if landmarks[tip_id][2] < landmarks[tip_id - 2][2]:
-                fingers.append(1)
-            else:
-                fingers.append(0)
-
+            if landmarks[tip_id][2] < landmarks[tip_id - 2][2]: fingers.append(1)
+            else: fingers.append(0)
         return sum(fingers)
 
     def _detect_gesture(self, finger_count):
-        """Detect gesture from finger count"""
-        if finger_count == 0:
-            return "fist"
-        elif finger_count == 1:
-            return "one"
-        elif finger_count == 2:
-            return "two"
-        elif finger_count == 3:
-            return "three"
-        elif finger_count == 4:
-            return "four"
-        elif finger_count == 5:
-            return "open"
+        if finger_count == 0: return "fist"
+        elif finger_count == 1: return "one"
+        elif finger_count == 2: return "two"
+        elif finger_count == 3: return "three"
+        elif finger_count == 4: return "four"
+        elif finger_count == 5: return "open"
         return "unknown"
 
     def update(self):
         ret, frame = self.cap.read()
-        if not ret:
-            return False
-
+        if not ret: return False
         frame = cv2.flip(frame, 1)
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb_frame)
@@ -363,24 +279,16 @@ class HandTrackerMediaPipe:
 
         if results.multi_hand_landmarks:
             for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                # Get palm position for eye tracking
-                palm = hand_landmarks.landmark[9]
-                self.hand_x = palm.x
-                self.hand_y = palm.y
+                # Track INDEX FINGER TIP (landmark #8) instead of palm
+                index_tip = hand_landmarks.landmark[self.INDEX_FINGER_TIP]
+                self.hand_x = index_tip.x
+                self.hand_y = index_tip.y
                 self.hand_detected = True
-
-                # Get landmarks list
                 self.landmarks_list = self._get_landmarks_list(hand_landmarks, frame.shape)
-
-                # Determine handedness
                 handedness = "Right"
                 if results.multi_handedness:
                     handedness = results.multi_handedness[idx].classification[0].label
-
-                # Count fingers
                 self.finger_count = self._count_fingers(self.landmarks_list, handedness)
-
-                # Detect gesture
                 self.gesture = self._detect_gesture(self.finger_count)
 
                 # Draw hand landmarks on frame
@@ -390,1628 +298,452 @@ class HandTrackerMediaPipe:
                     mp_drawing.DrawingSpec(color=(255, 0, 255), thickness=2)
                 )
 
-                # Draw landmark IDs on frame
+                # Draw landmark IDs on frame and highlight index finger tip
                 for id, cx, cy in self.landmarks_list:
-                    # Draw landmark ID number
-                    cv2.putText(frame, str(id), (cx - 10, cy - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-
-                # Draw finger tips with different colors
-                tip_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255)]
-                tip_names = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
-                for i, tip_id in enumerate(self.TIP_IDS):
-                    cx, cy = self.landmarks_list[tip_id][1], self.landmarks_list[tip_id][2]
-                    cv2.circle(frame, (cx, cy), 12, tip_colors[i], cv2.FILLED)
-                    cv2.circle(frame, (cx, cy), 14, (255, 255, 255), 2)
-
-                # Draw finger count and gesture info
-                h, w, _ = frame.shape
-                cv2.rectangle(frame, (0, 0), (250, 100), (0, 0, 0), -1)
-                cv2.putText(frame, f"Fingers: {self.finger_count}", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                cv2.putText(frame, f"Gesture: {self.gesture}", (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                cv2.putText(frame, f"Hand: {handedness}", (10, 90),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+                    cv2.putText(frame, str(id), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+                    # Highlight index finger tip with a circle
+                    if id == self.INDEX_FINGER_TIP:
+                        cv2.circle(frame, (cx, cy), 10, (0, 255, 255), 2)
 
         if self.gesture != old_gesture and self.gesture != "unknown":
             self.gesture_changed = True
-
         self.latest_frame = frame
         return True
 
     def get_normalized_position(self):
-        if not self.hand_detected:
-            return 0, 0
+        if not self.hand_detected: return 0, 0
         norm_x = (self.hand_x - 0.5) * 2
         norm_y = (self.hand_y - 0.5) * 2
         return norm_x, norm_y
 
     def release(self):
-        """Release camera resources - Force close to return camera to Available state"""
-        print("   [HandTracker] Releasing MediaPipe Hand Tracker...")
-        
-        # แก้ไข: ต้องสั่ง close() เพื่อคืน resource ให้ libcamera
         if self.cap is not None:
-            if hasattr(self.cap, 'close'):
-                print("   [HandTracker] Closing Picamera2 device...")
-                try:
-                    self.cap.close()
-                except Exception as e:
-                    print(f"   [HandTracker] Error closing: {e}")
-            elif hasattr(self.cap, 'release'):
-                self.cap.release()
-            
-            # ป้องกันการเรียกซ้ำ
+            if hasattr(self.cap, 'close'): self.cap.close()
+            elif hasattr(self.cap, 'release'): self.cap.release()
             self.cap = None
-        
         if hasattr(self, 'hands') and self.hands is not None:
-            try:
-                self.hands.close()
-            except Exception as e:
-                print(f"   [HandTracker] Error closing MediaPipe hands: {e}")
+            self.hands.close()
             self.hands = None
-        
-        print("   [HandTracker] MediaPipe Hand Tracker released")
-
 
 class HandTrackerOpenCV:
-    """Hand tracking with OpenCV skin detection"""
-
+    """Hand tracking with OpenCV skin detection (Fallback)"""
     def __init__(self, camera_id=0):
-        self.cap = PiCamera(camera_id, width=640, height=480, fps=30)
-
+        print("   [WARNING] Initializing OpenCV Hand Tracker (FALLBACK)...")
+        # Use 1280x720 to capture full FOV of IMX708
+        self.cap = PiCamera(camera_id, width=1280, height=720, fps=30)
         self.hand_x = 0.5
         self.hand_y = 0.5
         self.hand_detected = False
         self.latest_frame = None
-
         self.finger_count = 0
         self.gesture = "unknown"
         self.gesture_changed = False
-        self.last_gesture = "unknown"
-
         self.lower_skin = np.array([0, 20, 70], dtype=np.uint8)
         self.upper_skin = np.array([20, 255, 255], dtype=np.uint8)
 
-    def _count_fingers(self, contour):
-        try:
-            hull = cv2.convexHull(contour, returnPoints=False)
-            if len(hull) < 3:
-                return 0
-
-            defects = cv2.convexityDefects(contour, hull)
-            if defects is None:
-                return 0
-
-            finger_count = 0
-            for i in range(defects.shape[0]):
-                s, e, f, d = defects[i, 0]
-                start = tuple(contour[s][0])
-                end = tuple(contour[e][0])
-                far = tuple(contour[f][0])
-
-                a = np.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)
-                b = np.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)
-                c = np.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)
-
-                if b * c == 0:
-                    continue
-                angle = np.arccos((b**2 + c**2 - a**2) / (2 * b * c))
-
-                if angle <= np.pi / 2 and d > 10000:
-                    finger_count += 1
-
-            return min(finger_count + 1, 5) if finger_count > 0 else 0
-
-        except Exception:
-            return 0
-
     def update(self):
         ret, frame = self.cap.read()
-        if not ret:
-            return False
-
+        if not ret: return False
         frame = cv2.flip(frame, 1)
-
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.lower_skin, self.upper_skin)
-
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
         mask = cv2.erode(mask, kernel, iterations=2)
         mask = cv2.dilate(mask, kernel, iterations=2)
         mask = cv2.GaussianBlur(mask, (3, 3), 0)
-
         contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
+        
         self.hand_detected = False
         self.gesture_changed = False
-
         if contours:
             max_contour = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(max_contour)
-
-            if area > 5000:
+            if cv2.contourArea(max_contour) > 5000:
                 M = cv2.moments(max_contour)
                 if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"])
-                    cy = int(M["m01"] / M["m00"])
-
-                    h, w = frame.shape[:2]
-                    self.hand_x = cx / w
-                    self.hand_y = cy / h
+                    self.hand_x = int(M["m10"] / M["m00"]) / frame.shape[1]
+                    self.hand_y = int(M["m01"] / M["m00"]) / frame.shape[0]
                     self.hand_detected = True
-
-                    self.finger_count = self._count_fingers(max_contour)
-
-                    old_gesture = self.gesture
-                    if self.finger_count == 0 or self.finger_count == 1:
-                        self.gesture = "fist"
-                    elif self.finger_count == 2:
-                        self.gesture = "two"
-                    elif self.finger_count == 3:
-                        self.gesture = "three"
-                    elif self.finger_count == 4:
-                        self.gesture = "four"
-                    elif self.finger_count >= 5:
-                        self.gesture = "open"
-                    else:
-                        self.gesture = "unknown"
-
-                    if self.gesture != old_gesture and self.gesture != "unknown":
-                        self.gesture_changed = True
-                        self.last_gesture = self.gesture
-
         self.latest_frame = frame
         return True
 
     def get_normalized_position(self):
-        if not self.hand_detected:
-            return 0, 0
-        norm_x = (self.hand_x - 0.5) * 2
-        norm_y = (self.hand_y - 0.5) * 2
-        return norm_x, norm_y
+        if not self.hand_detected: return 0, 0
+        return (self.hand_x - 0.5) * 2, (self.hand_y - 0.5) * 2
 
     def release(self):
-        """Release camera resources - Force close to return camera to Available state"""
-        print("   [HandTracker] Releasing OpenCV Hand Tracker...")
-        
         if self.cap is not None:
-            if hasattr(self.cap, 'close'):
-                print("   [HandTracker] Closing Picamera2 device...")
-                try:
-                    self.cap.close()
-                except Exception as e:
-                    print(f"   [HandTracker] Error closing: {e}")
-            elif hasattr(self.cap, 'release'):
-                self.cap.release()
-            
-            # ป้องกันการเรียกซ้ำ
+            if hasattr(self.cap, 'close'): self.cap.close()
+            elif hasattr(self.cap, 'release'): self.cap.release()
             self.cap = None
-        
-        print("   [HandTracker] OpenCV Hand Tracker released")
 
+class RoboEyesApp:
+    """Main application supporting Single (Hand) and AI (Object) modes"""
 
-class RoboEyesHandTracker:
-    """Main application using RoboEyes for GC9A01A round display"""
-
-    def __init__(self, use_mediapipe=True, camera_id=0, show_camera=True, enable_tracking=True,
-                 enable_yolo=False, yolo_confidence=0.5):
+    def __init__(self, mode="hand", use_mediapipe=True, camera_id=0, show_camera=True):
+        self.mode = mode  # "hand" or "ai" or "demo"
         self.show_camera = show_camera
-        self.enable_tracking = enable_tracking
-        self.enable_yolo = enable_yolo
-        self.yolo_confidence = yolo_confidence
-
-        # YOLO tracker
-        self.yolo_tracker = None
-        self.yolo_detections = []
-
-        # Text overlay for GC9A01A
-        self.text_overlay = None
-
-        # Initialize Pygame
-        pygame.init()
-
-        if config.DISPLAY_MODE == "gc9a01a":
-            # Create GC9A01A display (or simulator)
-            self.gc9a01a = create_display()
-            # Create off-screen surface for rendering eyes
-            self.screen = pygame.Surface((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
-            print(f"Eye Display: GC9A01A {config.SCREEN_WIDTH}x{config.SCREEN_HEIGHT}")
-
-            # Create main window for camera view
-            if show_camera:
-                self.camera_screen = pygame.display.set_mode((640, 480))
-                pygame.display.set_caption("Hand Tracking - Camera View")
-                print("Camera Display: 640x480 on HDMI")
-            else:
-                self.camera_screen = None
-        else:
-            # Normal Pygame display
-            self.screen = pygame.display.set_mode((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
-            pygame.display.set_caption(config.CAPTION)
-            self.gc9a01a = None
-            self.camera_screen = None
-            print(f"Display: Pygame {config.SCREEN_WIDTH}x{config.SCREEN_HEIGHT}")
-
-        self.clock = pygame.time.Clock()
-
-        # Create RoboEyes callback
-        def robo_show(roboeyes):
-            if self.gc9a01a:
-                self.gc9a01a.draw_from_surface(self.screen)
-            else:
-                pygame.display.flip()
-
-        # Initialize RoboEyes
-        # Use white color for eyes (255, 255, 255)
-        self.robo = RoboEyes(
-            self.screen, 
-            config.SCREEN_WIDTH, 
-            config.SCREEN_HEIGHT, 
-            frame_rate=config.FPS,
-            on_show=robo_show,
-            bgcolor=0,  # Black background
-            fgcolor=(255, 255, 255)  # White color
-        )
-
-        # Configure RoboEyes for round display
-        if config.DISPLAY_MODE == "gc9a01a":
-            # Larger eyes for 240x240 display
-            # Increased size to fill the round screen better
-            self.robo.eyes_width(90, 90)
-            self.robo.eyes_height(90, 90)
-            self.robo.eyes_spacing(20)
-            self.robo.eyes_radius(20, 20)  # More rounded corners
         
-        # Enable auto-blinker and idle mode
-        self.robo.set_auto_blinker(ON, 3, 2)
-        if not self.enable_tracking:
-            self.robo.set_idle_mode(ON, 2, 2)  # Enable idle mode if not tracking
-        else:
-            self.robo.set_idle_mode(OFF)  # Disable idle, we'll control position manually
-
-        # Select Hand Tracker
-        if use_mediapipe and MEDIAPIPE_AVAILABLE:
-            self.hand_tracker = HandTrackerMediaPipe(camera_id)
-            print("Tracking: MediaPipe")
-        else:
-            self.hand_tracker = HandTrackerOpenCV(camera_id)
-            print("Tracking: OpenCV")
-
-        # Initialize YOLO tracker if enabled
-        if self.enable_yolo:
-            if YOLO_AVAILABLE:
-                self.yolo_tracker = create_yolo_tracker(
-                    confidence_threshold=self.yolo_confidence,
-                    frame_rate=30
-                )
-                self.yolo_tracker.start()
-                print("YOLO: Started (IMX500 AI Camera)")
-            else:
-                print("YOLO: Not available (modlib not installed)")
-
-        # Initialize text overlay for GC9A01A
-        if config.DISPLAY_MODE == "gc9a01a":
-            self.text_overlay = TextOverlay(config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
-            print("Text Overlay: Enabled")
-
-        # Initialize Servo Controller for camera pan-tilt
-        self.servo = ServoController()
-        if self.servo.enabled:
-            print("Servo: Pan-Tilt enabled (PCA9685)")
-        else:
-            print("Servo: Disabled")
-
-        # Initialize Voice Control
-        self.voice_thread = None
-        if VOICE_AVAILABLE:
-            self.voice_thread = VoiceThread(self.on_voice_command)
-            self.voice_thread.start()
-
-        self.running = True
-
-        # Set default mood
-        self.robo.mood = DEFAULT
-
-    def on_voice_command(self, text):
-        mood_changed = True
-        # Thai commands
-        if "มีความสุข" in text or "ยิ้ม" in text or "แฮปปี้" in text or "happy" in text or "smile" in text:
-            self.robo.mood = HAPPY
-            mood_name = "HAPPY (มีความสุข)"
-        elif "โกรธ" in text or "โมโห" in text or "angry" in text or "mad" in text:
-            self.robo.mood = ANGRY
-            mood_name = "ANGRY (โกรธ)"
-        elif "เหนื่อย" in text or "ง่วง" in text or "นอน" in text or "tired" in text or "sleep" in text:
-            self.robo.mood = TIRED
-            mood_name = "TIRED (เหนื่อย)"
-        elif "กลัว" in text or "หลอน" in text or "scary" in text or "fear" in text:
-            self.robo.mood = SCARY
-            mood_name = "SCARY (กลัว)"
-        elif "หนาว" in text or "เย็น" in text or "frozen" in text or "cold" in text:
-            self.robo.mood = FROZEN
-            mood_name = "FROZEN (หนาว)"
-        elif "สงสัย" in text or "อะไร" in text or "curious" in text or "what" in text:
-            self.robo.mood = CURIOUS
-            mood_name = "CURIOUS (สงสัย)"
-        elif "ปกติ" in text or "รีเซ็ต" in text or "normal" in text or "reset" in text:
-            self.robo.mood = DEFAULT
-            mood_name = "DEFAULT (ปกติ)"
-        else:
-            mood_changed = False
-            mood_name = "ไม่เปลี่ยน"
-
-        if mood_changed:
-            print(f"  >> เปลี่ยนอารมณ์เป็น: {mood_name}")
-            # Play robot sound
-            sound_key = mood_name.split()[0]  # Get "HAPPY", "ANGRY", etc.
-            if sound_key in MOOD_SOUNDS:
-                play_robot_sound(sound_key)
-        else:
-            print(f"  >> ไม่พบคำสั่ง (พูดว่า: มีความสุข/โกรธ/เหนื่อย/กลัว/หนาว/สงสัย/ปกติ)")
-
-    def run(self):
-
-        print("=" * 40)
-        print("  RoboEyes Hand-Eye Tracker")
-        if self.enable_yolo:
-            print("  + YOLO Object Detection")
-        print("=" * 40)
-        print("Controls:")
-        print("  ESC = Quit")
-        print("  SPACE = Random emotion")
-        print("=" * 40)
-
-        # Track detected objects for display
-        detected_objects = []
-        yolo_update_interval = 0.1  # Update YOLO display every 100ms
-        last_yolo_update = 0
-
-        while self.running:
-            current_time = time.time()
-
-            # Handle events
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        self.running = False
-                    elif event.key == pygame.K_SPACE:
-                        moods = [DEFAULT, TIRED, ANGRY, HAPPY, FROZEN, SCARY, CURIOUS]
-                        mood = random.choice(moods)
-                        self.robo.mood = mood
-                        print(f"Mood: {mood}")
-
-            # Update YOLO detections
-            if self.enable_yolo and self.yolo_tracker:
-                if current_time - last_yolo_update > yolo_update_interval:
-                    detected_objects = self.yolo_tracker.get_detection_text(max_items=3)
-                    last_yolo_update = current_time
-
-                    # Print detections periodically
-                    if detected_objects:
-                        print(f"  YOLO: {', '.join(detected_objects)} (FPS: {self.yolo_tracker.fps})")
-
-            # Update hand tracking
-            hand_x, hand_y = 0, 0
-            if self.enable_tracking:
-                self.hand_tracker.update()
-                hand_x, hand_y = self.hand_tracker.get_normalized_position()
-
-                # Handle gesture-based emotion changes
-                if hasattr(self.hand_tracker, 'gesture_changed') and self.hand_tracker.gesture_changed:
-                    gesture = self.hand_tracker.gesture
-                    finger_count = getattr(self.hand_tracker, 'finger_count', 0)
-                    emotion_map = {
-                        "fist": (ANGRY, "ANGRY"),      # 0 fingers - กำปั้น
-                        "one": (CURIOUS, "CURIOUS"),   # 1 finger - ชี้
-                        "two": (DEFAULT, "DEFAULT"),   # 2 fingers - ปกติ
-                        "three": (TIRED, "TIRED"),     # 3 fingers - เหนื่อย
-                        "four": (SCARY, "SCARY"),      # 4 fingers - กลัว
-                        "open": (HAPPY, "HAPPY"),      # 5 fingers - มีความสุข
-                    }
-                    if gesture in emotion_map:
-                        mood, mood_name = emotion_map[gesture]
-                        self.robo.mood = mood
-                        print(f"  Gesture: {gesture} ({finger_count} fingers) -> {mood_name}")
-                        # Play robot sound
-                        if mood_name in MOOD_SOUNDS:
-                            play_robot_sound(mood_name)
-
-                # Update eye position based on hand tracking
-                if self.hand_tracker.hand_detected:
-                    # Map hand position to screen coordinates
-                    # hand_x, hand_y range from -1 to 1
-                    # Map to eye position (0 to max constraint)
-                    max_x = self.robo.get_screen_constraint_X()
-                    max_y = self.robo.get_screen_constraint_Y()
-
-                    # Invert X for natural tracking
-                    eye_x = int((1 - (hand_x + 1) / 2) * max_x)
-                    eye_y = int(((hand_y + 1) / 2) * max_y)
-
-                    # Move servo to track hand (pan-tilt camera)
-                    if self.servo.enabled:
-                        # Track hand position with both servos
-                        # hand_x, hand_y are already in range -1 to 1
-                        self.servo.track_hand(hand_x, hand_y, smoothing=0.15, debug=True)
-
-                    # Clamp values
-                    eye_x = max(0, min(max_x, eye_x))
-                    eye_y = max(0, min(max_y, eye_y))
-
-                    # Set eye position
-                    self.robo.eyeLxNext = eye_x
-                    self.robo.eyeLyNext = eye_y
-
-                # Fallback: Use YOLO person detection for eye tracking if no hand detected
-                elif self.enable_yolo and self.yolo_tracker:
-                    yolo_x, yolo_y = self.yolo_tracker.get_normalized_position()
-                    if yolo_x != 0 or yolo_y != 0:
-                        max_x = self.robo.get_screen_constraint_X()
-                        max_y = self.robo.get_screen_constraint_Y()
-
-                        eye_x = int((1 - (yolo_x + 1) / 2) * max_x)
-                        eye_y = int(((yolo_y + 1) / 2) * max_y)
-
-                        eye_x = max(0, min(max_x, eye_x))
-                        eye_y = max(0, min(max_y, eye_y))
-
-                        self.robo.eyeLxNext = eye_x
-                        self.robo.eyeLyNext = eye_y
-
-            # Update RoboEyes (this handles animation and rendering)
-            self.robo.update()
-
-            # Draw text overlay on GC9A01A if YOLO detected something
-            if self.gc9a01a and self.text_overlay and self.enable_yolo and detected_objects:
-                # Create text surface with detected objects
-                text_surface = self.text_overlay.create_text_surface(
-                    detected_objects,
-                    bg_color=(0, 0, 0, 200),
-                    text_color=(0, 255, 255)  # Cyan text
-                )
-                if text_surface:
-                    # Blend with current eye surface and send to display
-                    combined = self.text_overlay.blend_with_eyes(self.screen, text_surface)
-                    self.gc9a01a.draw_from_surface(combined)
-
-            # Draw camera view on HDMI screen
-            if self.camera_screen and self.hand_tracker.latest_frame is not None:
-                frame = self.hand_tracker.latest_frame
-                # Convert BGR to RGB and create pygame surface
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_surface = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
-                self.camera_screen.blit(frame_surface, (0, 0))
-
-                # Draw tracking info
-                font = pygame.font.Font(None, 36)
-                if self.hand_tracker.hand_detected:
-                    status_text = f"TRACKING: X={hand_x:.2f} Y={hand_y:.2f}"
-                    color = (0, 255, 0)
-                else:
-                    status_text = "NO HAND DETECTED"
-                    color = (255, 0, 0)
-                text_surface = font.render(status_text, True, color)
-                self.camera_screen.blit(text_surface, (10, 10))
-
-                # Show current gesture
-                if hasattr(self.hand_tracker, 'gesture'):
-                    gesture_text = f"Gesture: {self.hand_tracker.gesture}"
-                    gesture_surface = font.render(gesture_text, True, (255, 255, 0))
-                    self.camera_screen.blit(gesture_surface, (10, 50))
-
-                # Show YOLO detections on HDMI too
-                if self.enable_yolo and detected_objects:
-                    yolo_text = f"YOLO: {', '.join(detected_objects)}"
-                    yolo_surface = font.render(yolo_text, True, (0, 255, 255))
-                    self.camera_screen.blit(yolo_surface, (10, 90))
-
-                pygame.display.flip()
-
-            self.clock.tick(config.FPS)
-
-        self.cleanup()
-
-    def cleanup(self):
-        if self.voice_thread:
-            self.voice_thread.stop()
-        self.hand_tracker.release()
-        if self.yolo_tracker:
-            self.yolo_tracker.cleanup()
-        if self.servo:
-            self.servo.cleanup()
-        if self.gc9a01a:
-            self.gc9a01a.cleanup()
-        pygame.quit()
-
-
-class DemoMode:
-    """Demo mode without camera - auto animation with RoboEyes"""
-
-    def __init__(self):
-        pygame.init()
-
-        if config.DISPLAY_MODE == "gc9a01a":
-            self.gc9a01a = create_display()
-            self.screen = pygame.Surface((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
-        else:
-            self.screen = pygame.display.set_mode((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
-            pygame.display.set_caption("RoboEyes Demo Mode")
-            self.gc9a01a = None
-
-        self.clock = pygame.time.Clock()
-
-        # Create RoboEyes callback
-        def robo_show(roboeyes):
-            if self.gc9a01a:
-                self.gc9a01a.draw_from_surface(self.screen)
-            else:
-                pygame.display.flip()
-
-        # Initialize RoboEyes
-        self.robo = RoboEyes(
-            self.screen,
-            config.SCREEN_WIDTH,
-            config.SCREEN_HEIGHT,
-            frame_rate=config.FPS,
-            on_show=robo_show,
-            bgcolor=0,
-            fgcolor=(255, 255, 255)
-        )
-
-        # Configure for round display
-        if config.DISPLAY_MODE == "gc9a01a":
-            self.robo.eyes_width(90, 90)
-            self.robo.eyes_height(90, 90)
-            self.robo.eyes_spacing(20)
-            self.robo.eyes_radius(20, 20)
-
-        # Enable auto features
-        self.robo.set_auto_blinker(ON, 3, 2)
-        self.robo.set_idle_mode(ON, 2, 2)
-
-        self.running = True
-        self.last_mood_change = 0
-        self.mood_interval = 5.0
-
-        # Initialize Voice Control
-        self.voice_thread = None
-        if VOICE_AVAILABLE:
-            self.voice_thread = VoiceThread(self.on_voice_command)
-            self.voice_thread.start()
-            print("Voice Control: Started (Thai)")
-
-    def on_voice_command(self, text):
-        mood_changed = True
-        # Thai commands
-        if "มีความสุข" in text or "ยิ้ม" in text or "แฮปปี้" in text or "happy" in text or "smile" in text:
-            self.robo.mood = HAPPY
-            mood_name = "HAPPY (มีความสุข)"
-        elif "โกรธ" in text or "โมโห" in text or "angry" in text or "mad" in text:
-            self.robo.mood = ANGRY
-            mood_name = "ANGRY (โกรธ)"
-        elif "เหนื่อย" in text or "ง่วง" in text or "นอน" in text or "tired" in text or "sleep" in text:
-            self.robo.mood = TIRED
-            mood_name = "TIRED (เหนื่อย)"
-        elif "กลัว" in text or "หลอน" in text or "scary" in text or "fear" in text:
-            self.robo.mood = SCARY
-            mood_name = "SCARY (กลัว)"
-        elif "หนาว" in text or "เย็น" in text or "frozen" in text or "cold" in text:
-            self.robo.mood = FROZEN
-            mood_name = "FROZEN (หนาว)"
-        elif "สงสัย" in text or "อะไร" in text or "curious" in text or "what" in text:
-            self.robo.mood = CURIOUS
-            mood_name = "CURIOUS (สงสัย)"
-        elif "ปกติ" in text or "รีเซ็ต" in text or "normal" in text or "reset" in text:
-            self.robo.mood = DEFAULT
-            mood_name = "DEFAULT (ปกติ)"
-        else:
-            mood_changed = False
-            mood_name = "ไม่เปลี่ยน"
-
-        if mood_changed:
-            print(f"  >> เปลี่ยนอารมณ์เป็น: {mood_name}")
-            self.last_mood_change = time.time()  # Reset auto mood timer
-            # Play robot sound
-            sound_key = mood_name.split()[0]  # Get "HAPPY", "ANGRY", etc.
-            if sound_key in MOOD_SOUNDS:
-                play_robot_sound(sound_key)
-        else:
-            print(f"  >> ไม่พบคำสั่ง (พูดว่า: มีความสุข/โกรธ/เหนื่อย/กลัว/หนาว/สงสัย/ปกติ)")
-
-    def run(self):
-        print("=" * 40)
-        print("  RoboEyes Demo Mode (Voice Control)")
-        print("=" * 40)
-        print("คำสั่งเสียง: มีความสุข/โกรธ/เหนื่อย/กลัว/หนาว/สงสัย/ปกติ")
-        print("=" * 40)
-        # Say startup message
-        play_robot_sound("DEFAULT")
-
-        moods = [DEFAULT, TIRED, ANGRY, HAPPY, FROZEN, SCARY, CURIOUS]
-        self.robo.mood = DEFAULT
-
-        while self.running:
-            current_time = time.time()
-
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-                if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        self.running = False
-
-            # Auto change mood
-            if current_time - self.last_mood_change > self.mood_interval:
-                mood = random.choice(moods)
-                self.robo.mood = mood
-                print(f"Demo mood: {mood}")
-                self.last_mood_change = current_time
-
-            # Update RoboEyes
-            self.robo.update()
-
-            self.clock.tick(config.FPS)
-
-        self.cleanup()
-
-    def cleanup(self):
-        if self.voice_thread:
-            self.voice_thread.stop()
-        if self.gc9a01a:
-            self.gc9a01a.cleanup()
-        pygame.quit()
-
-class CameraResourceManager:
-    """
-    จัดการ Camera Resources ด้วย psutil
-    - ตรวจสอบ process ที่ใช้กล้อง
-    - Kill zombie processes อย่างปลอดภัย
-    - Force cleanup ด้วย garbage collection
-    """
-
-    # Video device paths บน Raspberry Pi
-    VIDEO_DEVICES = [
-        "/dev/video0",
-        "/dev/video1",
-        "/dev/video2",
-        "/dev/video3",
-        "/dev/video4",
-        "/dev/video10",
-        "/dev/video11",
-        "/dev/video12",
-    ]
-
-    @staticmethod
-    def get_processes_using_camera(device_paths=None):
-        """
-        หา process ทั้งหมดที่ใช้กล้อง
-
-        Args:
-            device_paths: List of device paths to check (default: all video devices)
-
-        Returns:
-            Dict[int, Dict]: {pid: {"name": str, "files": list, "is_self": bool}}
-        """
-        if not PSUTIL_AVAILABLE:
-            return {}
-
-        if device_paths is None:
-            device_paths = CameraResourceManager.VIDEO_DEVICES
-
-        my_pid = os.getpid()
-        camera_processes = {}
-
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                pid = proc.info['pid']
-                name = proc.info['name']
-
-                # Get open files for this process
-                try:
-                    open_files = proc.open_files()
-                except (psutil.AccessDenied, psutil.NoSuchProcess):
-                    continue
-
-                # Check if any open file is a video device
-                camera_files = []
-                for f in open_files:
-                    if any(dev in f.path for dev in device_paths):
-                        camera_files.append(f.path)
-
-                if camera_files:
-                    camera_processes[pid] = {
-                        "name": name,
-                        "files": camera_files,
-                        "is_self": (pid == my_pid)
-                    }
-
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-
-        return camera_processes
-
-    @staticmethod
-    def kill_camera_blockers(device_paths=None, force=False, timeout=3.0):
-        """
-        Kill processes ที่ block กล้อง (ยกเว้นตัวเอง)
-
-        Args:
-            device_paths: List of device paths to check
-            force: ถ้า True จะ SIGKILL ทันที, ถ้า False จะ SIGTERM ก่อนแล้วค่อย SIGKILL
-            timeout: เวลารอหลัง SIGTERM ก่อน SIGKILL (วินาที)
-
-        Returns:
-            int: จำนวน process ที่ถูก kill
-        """
-        if not PSUTIL_AVAILABLE:
-            print("   [WARNING] psutil not available, using fallback...")
-            CameraResourceManager._fallback_kill_camera_blockers(device_paths)
-            return 0
-
-        processes = CameraResourceManager.get_processes_using_camera(device_paths)
-        killed_count = 0
-
-        for pid, info in processes.items():
-            if info["is_self"]:
-                print(f"   [SELF] PID {pid} ({info['name']}) - using {info['files']}")
-                print("   -> Running internal GC instead of killing...")
-                gc.collect()
-                continue
-
-            print(f"   [BLOCKER] PID {pid} ({info['name']}) - using {info['files']}")
-
-            try:
-                proc = psutil.Process(pid)
-
-                if force:
-                    # Force kill immediately
-                    proc.kill()
-                    print(f"   [KILLED] PID {pid} (SIGKILL)")
-                else:
-                    # Graceful termination first
-                    proc.terminate()
-                    print(f"   [TERM] PID {pid} - waiting {timeout}s...")
-
-                    try:
-                        proc.wait(timeout=timeout)
-                        print(f"   [TERMINATED] PID {pid}")
-                    except psutil.TimeoutExpired:
-                        # Force kill if not terminated
-                        proc.kill()
-                        print(f"   [KILLED] PID {pid} (SIGKILL after timeout)")
-
-                killed_count += 1
-
-            except psutil.NoSuchProcess:
-                print(f"   [GONE] PID {pid} already terminated")
-            except psutil.AccessDenied:
-                print(f"   [DENIED] No permission to kill PID {pid}")
-            except Exception as e:
-                print(f"   [ERROR] Failed to kill PID {pid}: {e}")
-
-        return killed_count
-
-    @staticmethod
-    def _fallback_kill_camera_blockers(device_paths=None):
-        """Fallback method using fuser command when psutil is not available"""
-        if device_paths is None:
-            device_paths = ["/dev/video0", "/dev/video4"]
-
-        for device_path in device_paths:
-            try:
-                result = subprocess.check_output(
-                    f"fuser {device_path} 2>/dev/null",
-                    shell=True,
-                    stderr=subprocess.DEVNULL
-                )
-                pids = [int(p) for p in result.decode().strip().split()]
-                my_pid = os.getpid()
-
-                for pid in pids:
-                    if pid != my_pid:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                            print(f"   [KILLED] PID {pid} via fuser")
-                        except Exception as e:
-                            print(f"   [ERROR] Could not kill PID {pid}: {e}")
-
-            except subprocess.CalledProcessError:
-                pass
-            except Exception:
-                pass
-
-    @staticmethod
-    def force_gc_cleanup():
-        """Force garbage collection and return collected count"""
-        collected = gc.collect()
-        if collected > 0:
-            print(f"   [GC] Collected {collected} objects")
-        return collected
-
-    @staticmethod
-    def wait_for_device_release(device_paths=None, timeout=5.0, check_interval=0.5):
-        """
-        รอจนกว่ากล้องจะ free หรือ timeout
-
-        Args:
-            device_paths: List of device paths to check
-            timeout: Maximum wait time (seconds)
-            check_interval: Time between checks (seconds)
-
-        Returns:
-            bool: True if device is free, False if timeout
-        """
-        if not PSUTIL_AVAILABLE:
-            time.sleep(timeout)
-            return True
-
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            processes = CameraResourceManager.get_processes_using_camera(device_paths)
-
-            # Filter out self
-            other_processes = {pid: info for pid, info in processes.items() if not info["is_self"]}
-
-            if not other_processes:
-                print(f"   [FREE] Camera devices are now available")
-                return True
-
-            print(f"   [WAIT] {len(other_processes)} process(es) still using camera...")
-            time.sleep(check_interval)
-
-        print(f"   [TIMEOUT] Camera not released after {timeout}s")
-        return False
-
-    @staticmethod
-    def comprehensive_cleanup(device_paths=None, force_kill=True, wait_timeout=3.0):
-        """
-        Comprehensive camera cleanup - ใช้ตอนสลับ mode
-
-        Steps:
-        1. Force GC to release Python objects
-        2. Find and kill blocking processes
-        3. Wait for device to be released
-        4. Final GC
-
-        Args:
-            device_paths: List of device paths
-            force_kill: Whether to force kill (SIGKILL) blocking processes
-            wait_timeout: Timeout for waiting device release
-
-        Returns:
-            bool: True if cleanup successful
-        """
-        print("   [CLEANUP] Starting comprehensive camera cleanup...")
-
-        # Step 1: Initial GC
-        CameraResourceManager.force_gc_cleanup()
-
-        # Step 2: Kill blockers
-        killed = CameraResourceManager.kill_camera_blockers(device_paths, force=force_kill)
-        if killed > 0:
-            print(f"   [CLEANUP] Killed {killed} blocking process(es)")
-
-        # Step 3: Wait for release
-        time.sleep(0.5)  # Short delay after killing
-        released = CameraResourceManager.wait_for_device_release(device_paths, timeout=wait_timeout)
-
-        # Step 4: Final GC
-        CameraResourceManager.force_gc_cleanup()
-
-        print(f"   [CLEANUP] Complete (released={released})")
-        return released
-
-
-def force_clear_camera(device_path="/dev/video0"):
-    """
-    ตรวจสอบว่ามีใครแย่งใช้กล้องอยู่ไหม (Legacy function - uses CameraResourceManager)
-    - ถ้าเป็นคนอื่น -> สั่ง Kill ทันที
-    - ถ้าเป็นตัวเอง -> สั่ง Garbage Collection เพื่อบังคับคืนค่า
-
-    Args:
-        device_path: Path to camera device (default: /dev/video0)
-    """
-    print(f"   - Checking camera blockers on {device_path}...")
-
-    if PSUTIL_AVAILABLE:
-        # Use psutil-based cleanup
-        CameraResourceManager.kill_camera_blockers([device_path], force=True)
-    else:
-        # Fallback to fuser
-        try:
-            result = subprocess.check_output(
-                f"fuser {device_path} 2>/dev/null",
-                shell=True,
-                stderr=subprocess.DEVNULL
-            )
-            pids = [int(p) for p in result.decode().strip().split()]
-
-            my_pid = os.getpid()
-
-            for pid in pids:
-                if pid != my_pid:
-                    print(f"   !!! Killing zombie process {pid} blocking camera...")
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                        print(f"   [SUCCESS] Killed process {pid}")
-                    except ProcessLookupError:
-                        print(f"   [INFO] Process {pid} already terminated")
-                    except PermissionError:
-                        print(f"   [WARNING] No permission to kill process {pid}")
-                    except Exception as e:
-                        print(f"   [WARNING] Error killing process {pid}: {e}")
-                else:
-                    print("   (Camera is held by this application. Running internal GC...)")
-
-        except subprocess.CalledProcessError:
-            print("   (No processes using camera or fuser not available)")
-        except Exception as e:
-            print(f"   (Could not check camera usage: {e})")
-
-    # บังคับ Internal Clean
-    collected = gc.collect()
-    if collected > 0:
-        print(f"   - GC collected {collected} objects")
-
-
-class AICameraMode:
-    """
-    AI Camera Mode - Hand tracking + YOLO detection
-
-    Modes:
-    - TRACK: Hand tracking with USB webcam (default)
-    - DETECT: YOLO object detection with IMX500
-
-    Keyboard:
-    - D: Switch to DETECT mode (YOLO)
-    - T: Switch to TRACK mode (Hand)
-    """
-
-    def __init__(self, use_mediapipe=True, yolo_confidence=0.5):
-        self.use_mediapipe = use_mediapipe
-        self.yolo_confidence = yolo_confidence
-
         # Initialize Pygame
         pygame.init()
 
-        if config.DISPLAY_MODE == "gc9a01a":
-            self.gc9a01a = create_display()
+        # Create Display
+        if config.DISPLAY_MODE in ["gc9a01a", "st7735s"]:
+            self.display = create_display()
             self.screen = pygame.Surface((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
-            print(f"Eye Display: GC9A01A {config.SCREEN_WIDTH}x{config.SCREEN_HEIGHT}")
-
-            # Create HDMI window for camera view
-            self.camera_screen = pygame.display.set_mode((640, 480))
-            pygame.display.set_caption("AI Camera Mode - YOLO Detection")
-            print("Camera Display: 640x480 on HDMI")
+            print(f"Display: {config.DISPLAY_MODE.upper()} {config.SCREEN_WIDTH}x{config.SCREEN_HEIGHT}")
         else:
+            self.display = None
             self.screen = pygame.display.set_mode((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
-            pygame.display.set_caption("AI Camera Mode")
-            self.gc9a01a = None
-            self.camera_screen = None
+            print(f"Display: Pygame Window {config.SCREEN_WIDTH}x{config.SCREEN_HEIGHT}")
 
         self.clock = pygame.time.Clock()
 
-        # Create RoboEyes callback
+        # RoboEyes Setup
         def robo_show(roboeyes):
-            if self.gc9a01a:
-                # Don't auto-update, we'll handle it with text overlay
-                pass
+            if self.display:
+                self.display.draw_from_surface(self.screen)
             else:
                 pygame.display.flip()
 
-        # Initialize RoboEyes
         self.robo = RoboEyes(
-            self.screen,
-            config.SCREEN_WIDTH,
-            config.SCREEN_HEIGHT,
-            frame_rate=config.FPS,
-            on_show=robo_show,
-            bgcolor=0,
-            fgcolor=(255, 255, 255)
+            self.screen, config.SCREEN_WIDTH, config.SCREEN_HEIGHT,
+            frame_rate=config.FPS, on_show=robo_show,
+            bgcolor=0, fgcolor=(255, 255, 255)
         )
 
-        # Configure for round display
+        # Config sizes
         if config.DISPLAY_MODE == "gc9a01a":
             self.robo.eyes_width(90, 90)
             self.robo.eyes_height(90, 90)
             self.robo.eyes_spacing(20)
             self.robo.eyes_radius(20, 20)
-
-        # Enable auto-blinker, disable idle mode (we control position)
+        elif config.DISPLAY_MODE == "st7735s":
+             # 128x160 settings - adjusted for robot eyes
+            self.robo.eyes_width(50, 50)
+            self.robo.eyes_height(60, 60)
+            self.robo.eyes_spacing(10)
+            self.robo.eyes_radius(10, 10)
+        
         self.robo.set_auto_blinker(ON, 3, 2)
-        self.robo.set_idle_mode(OFF)
 
-        # Current mode: TRACK (hand) or DETECT (YOLO)
-        self.current_mode = "TRACK"
-
-        # Initialize Hand Tracker (USB webcam) for TRACK mode
-        self.hand_tracker = None
-        if use_mediapipe and MEDIAPIPE_AVAILABLE:
-            self.hand_tracker = HandTrackerMediaPipe(camera_id=0)
-            print("Hand Tracking: MediaPipe (USB webcam)")
-        else:
-            self.hand_tracker = HandTrackerOpenCV(camera_id=0)
-            print("Hand Tracking: OpenCV (USB webcam)")
-
-        # Initialize YOLO tracker (IMX500) for DETECT mode - optional
-        self.yolo_tracker = None
-        # Disable YOLO for now - enable when needed
-        # if YOLO_AVAILABLE:
-        #     self.yolo_tracker = create_yolo_tracker(
-        #         confidence_threshold=self.yolo_confidence,
-        #         frame_rate=30
-        #     )
-        #     self.yolo_tracker.start()
-        #     self.yolo_tracker.set_mode(YoloMode.DETECT)
-        #     print("YOLO: Started (IMX500)")
-        print("YOLO: Disabled (use hand tracking only)")
-
-        # Initialize text overlay
+        # Text Overlay
         self.text_overlay = TextOverlay(config.SCREEN_WIDTH, config.SCREEN_HEIGHT)
+        
+        # Initialize Trackers
+        self.hand_tracker = None
+        self.yolo_tracker = None
+        
+        if self.mode == "hand":
+            print(f"Mode: HAND TRACKING (Camera {camera_id})")
+            if use_mediapipe and MEDIAPIPE_AVAILABLE:
+                self.hand_tracker = HandTrackerMediaPipe(camera_id)
+            else:
+                self.hand_tracker = HandTrackerOpenCV(camera_id)
+            self.robo.set_idle_mode(OFF)
+            
+        elif self.mode == "ai":
+            print("Mode: AI OBJECT DETECTION (IMX500)")
+            if YOLO_AVAILABLE:
+                self.yolo_tracker = create_yolo_tracker(confidence_threshold=0.5)
+                if self.yolo_tracker:
+                    self.yolo_tracker.start()
+            self.robo.set_idle_mode(OFF)
+            
+        else: # demo
+            print("Mode: DEMO")
+            self.robo.set_idle_mode(ON)
 
-        # Initialize Servo Controller for camera pan-tilt
+        # Servo
         self.servo = ServoController()
-        if self.servo.enabled:
-            print("Servo: Pan-Tilt enabled (PCA9685)")
-        else:
-            print("Servo: Disabled")
+        
+        # HDMI Camera View
+        self.camera_screen = None
+        self.secondary_cam = None
+        
+        if self.show_camera and self.mode != "demo":
+            # Dual View Window
+            self.camera_screen = pygame.display.set_mode((1280, 480))
+            pygame.display.set_caption("Dual Camera View (Left: USB, Right: IMX500)")
+            
+            # Setup Secondary Camera
+            if self.mode == "hand":
+                # User requested to Close IMX500 in Hand Mode
+                print("Hand Mode: IMX500 (Secondary) is DISABLED.")
+                self.secondary_cam = None
+            
+            elif self.mode == "ai":
+                # Primary is IMX500 (AI). Secondary is IMX708 (CSI).
+                # Since both are CSI, use Picamera2 for secondary too.
+                if PICAM2_AVAILABLE:
+                    print("Init Secondary: Scanning for free CSI camera...")
+                    for cam_idx in [0, 1]:
+                        try:
+                            # Try to open camera
+                            temp_cam = Picamera2(camera_num=cam_idx)
+                            # Use 1280x720 for wider FOV
+                            cam_config = temp_cam.create_preview_configuration(
+                                main={"size": (1280, 720), "format": "RGB888"}
+                            )
+                            temp_cam.configure(cam_config)
+                            temp_cam.start()
+                            
+                            self.secondary_cam = temp_cam
+                            print(f"   [SUCCESS] Secondary Camera (IMX708) started on Index {cam_idx}")
+                            break
+                        except Exception as e:
+                            print(f"   [INFO] Camera {cam_idx} busy or failed: {e}")
+                            if 'temp_cam' in locals():
+                                try: temp_cam.close()
+                                except: pass
+                            self.secondary_cam = None
+                
+                if self.secondary_cam is None:
+                    print("Error: Could not initialize secondary camera (IMX708)")
 
-        # Voice Control disabled for now (enable if microphone available)
+        # Voice
         self.voice_thread = None
-        # if VOICE_AVAILABLE:
-        #     self.voice_thread = VoiceThread(self.on_voice_command)
-        #     self.voice_thread.start()
-        #     print("Voice Control: Started")
-        print("Voice Control: Disabled")
+        if VOICE_AVAILABLE:
+            self.voice_thread = VoiceThread(self.on_voice_command)
+            self.voice_thread.start()
 
         self.running = True
-        self.robo.mood = DEFAULT
 
     def on_voice_command(self, text):
-        """Handle voice commands for YOLO mode and mood"""
-        text_lower = text.lower()
+        # Mood commands
+        mood_map = {
+            "happy": HAPPY, "ยิ้ม": HAPPY, "มีความสุข": HAPPY,
+            "angry": ANGRY, "โกรธ": ANGRY, "โมโห": ANGRY,
+            "tired": TIRED, "เหนื่อย": TIRED,
+            "scary": SCARY, "กลัว": SCARY,
+            "frozen": FROZEN, "หนาว": FROZEN,
+            "curious": CURIOUS, "สงสัย": CURIOUS,
+            "normal": DEFAULT, "ปกติ": DEFAULT
+        }
         
-        # Check for main mode switching commands (TRACK vs DETECT)
-        if "ตรวจจับ" in text or "detect" in text_lower:
-            # Switch to DETECT mode (YOLO)
-            if self.current_mode != "DETECT":
-                print("\n[Mode Switch] Switching to DETECT (YOLO) via voice...")
-                
-                # 1. RELEASE HAND TRACKER (สำคัญมาก! ต้องปล่อยกล้องก่อน)
-                if self.hand_tracker is not None:
-                    print("   - Releasing Hand Tracker (USB webcam)...")
-                    try:
-                        self.hand_tracker.release()
-                        print("   [SUCCESS] Hand Tracker released")
-                    except Exception as e:
-                        print(f"   ! Release warning: {e}")
-                    self.hand_tracker = None
-                    gc.collect()
-                
-                # 2. Cleanup existing YOLO tracker if any
-                if self.yolo_tracker is not None:
-                    print("   - Cleaning up existing tracker...")
-                    try:
-                        self.yolo_tracker.cleanup()
-                    except Exception as e:
-                        print(f"   ! Cleanup warning: {e}")
-                    self.yolo_tracker = None
-
-                # 3. Use CameraResourceManager for comprehensive cleanup
-                CameraResourceManager.comprehensive_cleanup(
-                    device_paths=["/dev/video0", "/dev/video4"],
-                    force_kill=True,
-                    wait_timeout=3.0
-                )
-
-                self.current_mode = "DETECT"
-                print("   - Initializing IMX500...")
-
-                # Initialize YOLO if available
-                if YOLO_AVAILABLE:
-                    try:
-                        self.yolo_tracker = create_yolo_tracker(
-                            confidence_threshold=self.yolo_confidence,
-                            frame_rate=30
-                        )
-                        if self.yolo_tracker and self.yolo_tracker.device:
-                            self.yolo_tracker.start()
-                            self.yolo_tracker.set_mode(YoloMode.DETECT)
-                            print("   [SUCCESS] YOLO Started (IMX500)")
-                        else:
-                            raise Exception("Device is None after init")
-                    except Exception as e:
-                        print(f"   [ERROR] Failed to start YOLO: {e}")
-                        self.yolo_tracker = None
-                        self.current_mode = "TRACK"
-                else:
-                    print("   [ERROR] YOLO not available")
-                    self.current_mode = "TRACK"
-            return
-        
-        if ("ติดตามมือ" in text or "track hand" in text_lower or 
-            ("ติดตาม" in text and "มือ" in text) or
-            (self.current_mode == "DETECT" and ("มือ" in text or "hand" in text_lower))):
-            # Switch to TRACK mode (Hand)
-            if self.current_mode != "TRACK":
-                print("\n[Mode Switch] Switching to TRACK (Hand) via voice...")
-                
-                # 1. Cleanup YOLO tracker when switching away from DETECT mode
-                if self.yolo_tracker is not None:
-                    print("   - Cleaning up YOLO tracker...")
-                    try:
-                        self.yolo_tracker.cleanup()
-                    except Exception as e:
-                        print(f"   ! Cleanup warning: {e}")
-                    self.yolo_tracker = None
-                
-                # 2. Use CameraResourceManager for cleanup
-                CameraResourceManager.comprehensive_cleanup(
-                    device_paths=["/dev/video0", "/dev/video4"],
-                    force_kill=False,
-                    wait_timeout=2.0
-                )
-                
-                # 3. สร้าง Hand Tracker ใหม่ (สำคัญมาก! ต้องสร้างใหม่)
-                if self.hand_tracker is None:
-                    print("   - Initializing Hand Tracker (USB webcam)...")
-                    try:
-                        if self.use_mediapipe and MEDIAPIPE_AVAILABLE:
-                            self.hand_tracker = HandTrackerMediaPipe(camera_id=0)
-                            print("   [SUCCESS] Hand Tracker (MediaPipe) initialized")
-                        else:
-                            self.hand_tracker = HandTrackerOpenCV(camera_id=0)
-                            print("   [SUCCESS] Hand Tracker (OpenCV) initialized")
-                    except Exception as e:
-                        print(f"   [ERROR] Failed to initialize Hand Tracker: {e}")
-                
-                self.current_mode = "TRACK"
-                print("   [SUCCESS] Switched to TRACK mode")
-            return
-        
-        # Then check YOLO sub-commands (mode switching within YOLO, target change, show/hide)
-        if self.yolo_tracker and self.yolo_tracker.process_voice_command(text):
-            mode_text = self.yolo_tracker.get_mode_text()
-            print(f"  >> YOLO: {mode_text}")
-            return
-
-        # Then check mood commands
-        mood_changed = True
-        if "มีความสุข" in text or "ยิ้ม" in text or "แฮปปี้" in text or "happy" in text or "smile" in text:
-            self.robo.mood = HAPPY
-            mood_name = "HAPPY"
-        elif "โกรธ" in text or "โมโห" in text or "angry" in text or "mad" in text:
-            self.robo.mood = ANGRY
-            mood_name = "ANGRY"
-        elif "เหนื่อย" in text or "ง่วง" in text or "นอน" in text or "tired" in text or "sleep" in text:
-            self.robo.mood = TIRED
-            mood_name = "TIRED"
-        elif "กลัว" in text or "หลอน" in text or "scary" in text or "fear" in text:
-            self.robo.mood = SCARY
-            mood_name = "SCARY"
-        elif "หนาว" in text or "เย็น" in text or "frozen" in text or "cold" in text:
-            self.robo.mood = FROZEN
-            mood_name = "FROZEN"
-        elif "สงสัย" in text or "อะไร" in text or "curious" in text or "what" in text:
-            self.robo.mood = CURIOUS
-            mood_name = "CURIOUS"
-        elif "ปกติ" in text or "รีเซ็ต" in text or "normal" in text or "reset" in text:
-            self.robo.mood = DEFAULT
-            mood_name = "DEFAULT"
-        else:
-            mood_changed = False
-            mood_name = ""
-
-        if mood_changed:
-            print(f"  >> Mood: {mood_name}")
-            if mood_name in MOOD_SOUNDS:
-                play_robot_sound(mood_name)
-        else:
-            print(f"  >> ไม่เข้าใจคำสั่ง: {text}")
+        for kw, mood in mood_map.items():
+            if kw in text.lower():
+                self.robo.mood = mood
+                print(f"  > Mood changed: {kw}")
+                return
 
     def run(self):
-        print("=" * 50)
-        print("  Hand Tracking Mode (USB Webcam)")
-        print("=" * 50)
-        print("Keyboard: ESC=Quit, SPACE=Random mood, D=DETECT mode, T=TRACK mode")
-        print("=" * 50)
-
-        display_update_interval = 0.05  # Update GC9A01A at 20 FPS max
-        last_display_update = 0
-        hdmi_update_interval = 0.033  # Update HDMI at 30 FPS
-        last_hdmi_update = 0
-
-        # Cache for text overlay
-        cached_text_surface = None
-        cached_texts = []
-
-        # Pre-create font for HDMI
-        hdmi_font = pygame.font.Font(None, 36)
-
+        print("Running...")
         while self.running:
-            current_time = time.time()
-
-            # Handle events
             for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-
+                if event.type == pygame.QUIT: self.running = False
                 if event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        self.running = False
-                    elif event.key == pygame.K_SPACE:
-                        moods = [DEFAULT, TIRED, ANGRY, HAPPY, FROZEN, SCARY, CURIOUS]
-                        mood = random.choice(moods)
-                        self.robo.mood = mood
-                        print(f"Mood: {mood}")
-                    elif event.key == pygame.K_d:
-                        # === Switch to DETECT mode (YOLO) ===
-                        if self.current_mode != "DETECT":
-                            print("\n[Mode Switch] Switching to DETECT (YOLO)...")
-
-                            # 1. RELEASE HAND TRACKER (สำคัญมาก! ต้องปล่อยกล้องก่อน)
-                            if self.hand_tracker is not None:
-                                print("   - Releasing Hand Tracker (USB webcam)...")
-                                try:
-                                    self.hand_tracker.release()
-                                    print("   [SUCCESS] Hand Tracker released")
-                                except Exception as e:
-                                    print(f"   ! Release warning: {e}")
-                                self.hand_tracker = None
-                                gc.collect()
-
-                            # 2. CLEANUP: ล้าง YOLO Tracker เก่าแบบหมดจด
-                            if self.yolo_tracker is not None:
-                                print("   - Cleaning up existing YOLO tracker...")
-                                try:
-                                    self.yolo_tracker.cleanup()
-                                except Exception as e:
-                                    print(f"   ! Cleanup warning: {e}")
-
-                                self.yolo_tracker = None
-
-                            # 3. ใช้ CameraResourceManager แทน force_clear_camera
-                            # Comprehensive cleanup: kill blockers, GC, wait for release
-                            CameraResourceManager.comprehensive_cleanup(
-                                device_paths=["/dev/video0", "/dev/video4"],
-                                force_kill=True,
-                                wait_timeout=3.0
-                            )
+                    if event.key == pygame.K_ESCAPE: self.running = False
+                    if event.key == pygame.K_SPACE:
+                        self.robo.mood = random.choice([HAPPY, ANGRY, TIRED, DEFAULT])
+                    
+                    # Camera Swap (Hand Mode Only)
+                    if event.key == pygame.K_c and self.mode == "hand":
+                        print("Swapping cameras...")
+                        # 1. Determine new IDs
+                        current_id = self.hand_tracker.cap.camera_id if self.hand_tracker else 0
+                        new_id = 1 if current_id == 0 else 0
+                        
+                        # 2. Release resources
+                        if self.hand_tracker: self.hand_tracker.release()
+                        if self.secondary_cam:
+                            try:
+                                if hasattr(self.secondary_cam, 'stop'): self.secondary_cam.stop()
+                                if hasattr(self.secondary_cam, 'close'): self.secondary_cam.close()
+                            except: pass
+                            self.secondary_cam = None
+                        
+                        # 3. Re-init Hand Tracker
+                        print(f"Re-init Hand Tracker on Camera {new_id}...")
+                        if MEDIAPIPE_AVAILABLE:
+                            self.hand_tracker = HandTrackerMediaPipe(new_id)
+                        else:
+                            self.hand_tracker = HandTrackerOpenCV(new_id)
                             
-                            self.current_mode = "DETECT"
+                        # 4. Re-init Secondary Camera (on the other ID)
+                        sec_id = 1 if new_id == 0 else 0
+                        if PICAM2_AVAILABLE:
+                            try:
+                                print(f"Re-init Secondary (View) on Camera {sec_id}...")
+                                self.secondary_cam = Picamera2(camera_num=sec_id)
+                                cfg = self.secondary_cam.create_preview_configuration(
+                                    main={"size": (640, 480), "format": "RGB888"}
+                                )
+                                self.secondary_cam.configure(cfg)
+                                self.secondary_cam.start()
+                            except Exception as e:
+                                print(f"Secondary init failed: {e}")
 
-                            # 3. INITIALIZE: สร้าง Tracker ใหม่ (with retry)
-                            if YOLO_AVAILABLE:
-                                max_retries = 2
-                                for attempt in range(max_retries):
-                                    try:
-                                        if attempt > 0:
-                                            print(f"   - Retry attempt {attempt + 1}/{max_retries}...")
-                                            # Additional cleanup before retry
-                                            CameraResourceManager.comprehensive_cleanup(
-                                                device_paths=["/dev/video0", "/dev/video4"],
-                                                force_kill=True,
-                                                wait_timeout=5.0
-                                            )
+            target_x, target_y = 0, 0
+            has_target = False
 
-                                        print("   - Initializing IMX500...")
-                                        self.yolo_tracker = create_yolo_tracker(
-                                            confidence_threshold=self.yolo_confidence,
-                                            frame_rate=30
-                                        )
-                                        # เช็คว่าสร้าง device สำเร็จไหม
-                                        if self.yolo_tracker and self.yolo_tracker.device:
-                                            self.yolo_tracker.start()
-                                            self.yolo_tracker.set_mode(YoloMode.DETECT)
-                                            print("   [SUCCESS] YOLO Started")
-                                            break  # Success, exit retry loop
-                                        else:
-                                            raise Exception("Device is None after init")
+            if self.mode == "hand" and self.hand_tracker:
+                self.hand_tracker.update()
+                if self.hand_tracker.hand_detected:
+                    target_x, target_y = self.hand_tracker.get_normalized_position()
+                    has_target = True
+                    # Gesture emotions
+                    if self.hand_tracker.gesture == "fist": self.robo.mood = ANGRY
+                    elif self.hand_tracker.gesture == "open": self.robo.mood = HAPPY
 
-                                    except Exception as e:
-                                        print(f"   [ERROR] Attempt {attempt + 1} failed: {e}")
-                                        # Cleanup failed tracker
-                                        if self.yolo_tracker:
-                                            try:
-                                                self.yolo_tracker.cleanup()
-                                            except Exception as cleanup_err:
-                                                print(f"   ! Cleanup error: {cleanup_err}")
-                                        self.yolo_tracker = None
+            elif self.mode == "ai" and self.yolo_tracker:
+                tx, ty = self.yolo_tracker.get_normalized_position()
+                if tx != 0 or ty != 0:
+                    target_x, target_y = tx, ty
+                    has_target = True
 
-                                        if attempt == max_retries - 1:
-                                            print("   [FATAL] All retry attempts failed")
-                                            self.current_mode = "TRACK"  # Fallback
-                            else:
-                                print("   [ERROR] YOLO not available")
-                                self.current_mode = "TRACK"
-                    elif event.key == pygame.K_t:
-                        # === Switch to TRACK mode (Hand) ===
-                        if self.current_mode != "TRACK":
-                            print("\n[Mode Switch] Switching to TRACK (Hand)...")
+            # Update Eye Position
+            if has_target:
+                max_x = self.robo.get_screen_constraint_X()
+                max_y = self.robo.get_screen_constraint_Y()
+                eye_x = int((1 - (target_x + 1) / 2) * max_x)
+                eye_y = int(((target_y + 1) / 2) * max_y)
+                self.robo.eyeLxNext = max(0, min(max_x, eye_x))
+                self.robo.eyeLyNext = max(0, min(max_y, eye_y))
+                
+                if self.servo.enabled:
+                    self.servo.track_hand(target_x, target_y)
 
-                            # 1. Cleanup YOLO เพื่อคืนกล้องให้ระบบ
-                            if self.yolo_tracker is not None:
-                                print("   - Cleaning up YOLO tracker...")
-                                try:
-                                    self.yolo_tracker.cleanup()
-                                except Exception as e:
-                                    print(f"   ! Cleanup warning: {e}")
-
-                                self.yolo_tracker = None
-
-                            # 2. Use CameraResourceManager for cleanup
-                            CameraResourceManager.comprehensive_cleanup(
-                                device_paths=["/dev/video0", "/dev/video4"],
-                                force_kill=False,  # Graceful termination for TRACK mode
-                                wait_timeout=2.0
-                            )
-
-                            # 3. สร้าง Hand Tracker ใหม่ (สำคัญมาก! ต้องสร้างใหม่)
-                            if self.hand_tracker is None:
-                                print("   - Initializing Hand Tracker (USB webcam)...")
-                                try:
-                                    if self.use_mediapipe and MEDIAPIPE_AVAILABLE:
-                                        self.hand_tracker = HandTrackerMediaPipe(camera_id=0)
-                                        print("   [SUCCESS] Hand Tracker (MediaPipe) initialized")
-                                    else:
-                                        self.hand_tracker = HandTrackerOpenCV(camera_id=0)
-                                        print("   [SUCCESS] Hand Tracker (OpenCV) initialized")
-                                except Exception as e:
-                                    print(f"   [ERROR] Failed to initialize Hand Tracker: {e}")
-
-                            self.current_mode = "TRACK"
-                            print("   [SUCCESS] Switched to TRACK mode")
-
-            # Update tracking based on current mode
-            hand_x, hand_y = 0, 0
-            yolo_x, yolo_y = 0, 0
-            
-            if self.current_mode == "TRACK":
-                # TRACK mode: Use hand tracking
-                if self.hand_tracker:
-                    self.hand_tracker.update()
-                    hand_x, hand_y = self.hand_tracker.get_normalized_position()
-
-                    if self.hand_tracker.hand_detected:
-                        max_x = self.robo.get_screen_constraint_X()
-                        max_y = self.robo.get_screen_constraint_Y()
-
-                        # Invert X for natural tracking
-                        eye_x = int((1 - (hand_x + 1) / 2) * max_x)
-                        eye_y = int(((hand_y + 1) / 2) * max_y)
-
-                        eye_x = max(0, min(max_x, eye_x))
-                        eye_y = max(0, min(max_y, eye_y))
-
-                        self.robo.eyeLxNext = eye_x
-                        self.robo.eyeLyNext = eye_y
-
-                        # Move servo to track hand (pan-tilt camera)
-                        if self.servo.enabled:
-                            # Track hand position with both servos
-                            # hand_x, hand_y are already in range -1 to 1
-                            self.servo.track_hand(hand_x, hand_y, smoothing=0.15, debug=False)
-            
-            elif self.current_mode == "DETECT":
-                # DETECT mode: Use YOLO object detection
-                if self.yolo_tracker and self.yolo_tracker.running:
-                    try:
-                        yolo_x, yolo_y = self.yolo_tracker.get_normalized_position()
-                        if yolo_x != 0 or yolo_y != 0:
-                            max_x = self.robo.get_screen_constraint_X()
-                            max_y = self.robo.get_screen_constraint_Y()
-
-                            eye_x = int((1 - (yolo_x + 1) / 2) * max_x)
-                            eye_y = int(((yolo_y + 1) / 2) * max_y)
-
-                            eye_x = max(0, min(max_x, eye_x))
-                            eye_y = max(0, min(max_y, eye_y))
-
-                            self.robo.eyeLxNext = eye_x
-                            self.robo.eyeLyNext = eye_y
-
-                            # Move servo to track object (pan-tilt camera)
-                            if self.servo.enabled:
-                                self.servo.track_hand(yolo_x, yolo_y, smoothing=0.15, debug=False)
-                    except Exception as e:
-                        print(f"YOLO tracking error: {e}")
-                        # Fallback to TRACK mode if YOLO fails
-                        self.current_mode = "TRACK"
-
-            # Update RoboEyes
             self.robo.update()
 
-            # Update GC9A01A display (throttled to 20 FPS)
-            if self.gc9a01a and current_time - last_display_update > display_update_interval:
-                last_display_update = current_time
-
-                # Prepare text lines based on current mode
-                if self.current_mode == "TRACK":
-                    display_texts = ["TRACK: Hand"]
-                    if self.hand_tracker and self.hand_tracker.hand_detected:
-                        gesture = getattr(self.hand_tracker, 'gesture', 'unknown')
-                        display_texts.append(f"{gesture}")
-                elif self.current_mode == "DETECT":
-                    display_texts = ["DETECT: YOLO"]
-                    if self.yolo_tracker and self.yolo_tracker.running:
-                        try:
-                            detected_objects = self.yolo_tracker.get_detection_text(max_items=2)
-                            if detected_objects:
-                                display_texts.extend(detected_objects)
-                        except Exception:
-                            display_texts.append("Error")
-                    else:
-                        display_texts.append("Not available")
+            # Render Text Overlay (Hand Mode)
+            if self.mode == "hand" and self.hand_tracker and self.display:
+                fingers = getattr(self.hand_tracker, 'finger_count', 0)
+                gesture = getattr(self.hand_tracker, 'gesture', '')
+                
+                # Prepare text - shorter format for small screens
+                texts = []
+                if config.DISPLAY_MODE == "st7735s":
+                    # Compact format for ST7735
+                    texts = [f"F:{fingers}"]  # "F:3" instead of "Fingers: 3"
+                    if gesture and gesture != "unknown":
+                        texts.append(f"{gesture.upper()}")  # "OPEN" instead of "Gesture: open"
                 else:
-                    display_texts = [f"MODE: {self.current_mode}"]
+                    # Full format for GC9A01A
+                    texts = [f"Fingers: {fingers}"]
+                    if gesture and gesture != "unknown":
+                        texts.append(f"Gesture: {gesture}")
+                
+                text_surface = self.text_overlay.create_text_surface(texts)
+                if text_surface:
+                    self.screen.blit(text_surface, (0, 0))
 
-                # Only recreate text surface if content changed
-                if display_texts != cached_texts:
-                    cached_texts = display_texts.copy()
-                    cached_text_surface = self.text_overlay.create_text_surface(
-                        display_texts,
-                        bg_color=(0, 0, 0, 180),
-                        text_color=(0, 255, 255)
-                    )
-
-                # Draw to GC9A01A
-                if cached_text_surface:
-                    combined = self.text_overlay.blend_with_eyes(self.screen, cached_text_surface)
-                    self.gc9a01a.draw_from_surface(combined)
-                else:
-                    self.gc9a01a.draw_from_surface(self.screen)
-
-            # Draw camera view on HDMI (throttled to 30 FPS)
+            # Render Text Overlay (AI Mode)
+            if self.mode == "ai" and self.yolo_tracker and self.display:
+                detected_texts = self.yolo_tracker.get_detection_text(max_items=2)
+                # print(f"DEBUG: detected_texts={detected_texts}") # DEBUG
+                if detected_texts:
+                    text_surface = self.text_overlay.create_text_surface(detected_texts)
+                    if text_surface:
+                        # Blend text onto the main screen surface *before* sending to display
+                        self.screen.blit(text_surface, (0, 0))
+            
+            # Camera View
             if self.camera_screen:
-                if current_time - last_hdmi_update > hdmi_update_interval:
-                    last_hdmi_update = current_time
+                frame_left = None  # USB
+                frame_right = None # IMX500
 
-                    # Clear screen first
-                    self.camera_screen.fill((0, 0, 0))
+                # --- DEBUG: Print status every 3 seconds ---
+                if int(time.time()) % 3 == 0 and int(time.time() * 10) % 10 == 0:
+                    print(f"DEBUG: Mode={self.mode}")
+                    if self.mode == "ai":
+                        if self.yolo_tracker:
+                            print(f"  YOLO Running: {self.yolo_tracker.running}")
+                            print(f"  YOLO Frame: {'Yes' if self.yolo_tracker.latest_frame is not None else 'No'}")
+                        if self.secondary_cam:
+                            print(f"  USB Cam Open: {self.secondary_cam.isOpened()}")
+                # -------------------------------------------
 
-                    # Show frame based on current mode
-                    frame = None
-                    if self.current_mode == "TRACK" and self.hand_tracker:
-                        frame = self.hand_tracker.latest_frame
-                    elif self.current_mode == "DETECT" and self.yolo_tracker:
-                        # Only get frame if YOLO tracker is actually running
-                        if self.yolo_tracker.running:
-                            try:
-                                frame = self.yolo_tracker.latest_frame
-                            except Exception as e:
-                                # If YOLO fails, fallback to hand tracker frame
-                                if self.hand_tracker:
-                                    frame = self.hand_tracker.latest_frame
-                        else:
-                            # YOLO not running, use hand tracker frame
-                            if self.hand_tracker:
-                                frame = self.hand_tracker.latest_frame
-                    
-                    if frame is not None:
-                        try:
-                            # Convert BGR to RGB for pygame
-                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            if frame_rgb.shape[0] != 480 or frame_rgb.shape[1] != 640:
-                                frame_rgb = cv2.resize(frame_rgb, (640, 480))
-                            frame_surface = pygame.surfarray.make_surface(frame_rgb.swapaxes(0, 1))
-                            self.camera_screen.blit(frame_surface, (0, 0))
-                        except Exception as e:
-                            err_surface = hdmi_font.render(f"Frame error: {e}", True, (255, 0, 0))
-                            self.camera_screen.blit(err_surface, (10, 200))
+                # Get Primary Frame
+                if self.mode == "hand" and self.hand_tracker:
+                    frame_left = self.hand_tracker.latest_frame # Already BGR
+                elif self.mode == "ai" and self.yolo_tracker:
+                    frame_right = self.yolo_tracker.latest_frame # Already RGB usually?
 
-                    # Show status based on current mode
-                    mode_text = f"Mode: {self.current_mode}"
-                    if self.current_mode == "TRACK":
-                        mode_text += " (Hand)"
-                    elif self.current_mode == "DETECT":
-                        mode_text += " (YOLO)"
-                    
-                    mode_surface = hdmi_font.render(mode_text, True, (0, 255, 255))
-                    self.camera_screen.blit(mode_surface, (10, 10))
+                # Get Secondary Frame
+                if self.secondary_cam:
+                    try:
+                        # Secondary is always Picamera2 now (for both CSI cameras)
+                        frame_sec = self.secondary_cam.capture_array()
+                        
+                        if self.mode == "hand": 
+                            # Hand Mode: Primary=USB/CSI(0), Sec=IMX500(1) -> Right
+                            frame_right = frame_sec
+                        elif self.mode == "ai": 
+                            # AI Mode: Primary=IMX500(1?), Sec=IMX708(0?) -> Left
+                            # Picamera2 returns RGB, convert to BGR for OpenCV consistency if needed
+                            # But here we render to Pygame which wants RGB.
+                            # YOLO frame (frame_right) logic below assumes BGR conversion?
+                            # Let's keep RGB for display.
+                            frame_left = cv2.cvtColor(frame_sec, cv2.COLOR_RGB2BGR) # Store as BGR for consistency
+                    except Exception as e:
+                        # print(f"Sec Cam Error: {e}")
+                        pass
 
-                    # Show tracking info based on mode
-                    if self.current_mode == "TRACK" and self.hand_tracker:
-                        if self.hand_tracker.hand_detected:
-                            gesture = getattr(self.hand_tracker, 'gesture', 'unknown')
-                            finger_count = getattr(self.hand_tracker, 'finger_count', 0)
-                            hand_text = f"Gesture: {gesture} ({finger_count} fingers)"
-                            hand_surface = hdmi_font.render(hand_text, True, (0, 255, 0))
-                            self.camera_screen.blit(hand_surface, (10, 50))
-                        else:
-                            no_hand = hdmi_font.render("No hand detected", True, (255, 255, 0))
-                            self.camera_screen.blit(no_hand, (10, 50))
-                    elif self.current_mode == "DETECT":
-                        if self.yolo_tracker and self.yolo_tracker.running:
-                            try:
-                                detected_objects = self.yolo_tracker.get_detection_text(max_items=3)
-                                if detected_objects:
-                                    yolo_text = f"Objects: {', '.join(detected_objects)}"
-                                    yolo_surface = hdmi_font.render(yolo_text, True, (0, 255, 0))
-                                    self.camera_screen.blit(yolo_surface, (10, 50))
-                                else:
-                                    no_obj = hdmi_font.render("No objects detected", True, (255, 255, 0))
-                                    self.camera_screen.blit(no_obj, (10, 50))
-                            except Exception as e:
-                                error_text = f"YOLO error: {str(e)[:30]}"
-                                error_surface = hdmi_font.render(error_text, True, (255, 0, 0))
-                                self.camera_screen.blit(error_surface, (10, 50))
-                        else:
-                            no_yolo = hdmi_font.render("YOLO not available", True, (255, 255, 0))
-                            self.camera_screen.blit(no_yolo, (10, 50))
+                # Draw Left (USB)
+                if frame_left is not None:
+                    try:
+                        frame_left = cv2.resize(frame_left, (640, 480))
+                        # Convert BGR to RGB for Pygame
+                        frame_left = cv2.cvtColor(frame_left, cv2.COLOR_BGR2RGB)
+                        surf = pygame.surfarray.make_surface(frame_left.swapaxes(0, 1))
+                        self.camera_screen.blit(surf, (0, 0))
+                    except: pass
+                else:
+                    # Draw Placeholder for Left
+                    pygame.draw.rect(self.camera_screen, (20, 20, 20), (0, 0, 640, 480))
+                    font = pygame.font.Font(None, 36)
+                    self.camera_screen.blit(font.render("No USB Cam", True, (100, 100, 100)), (250, 220))
+                
+                # Draw Right (IMX500)
+                if frame_right is not None:
+                    try:
+                        frame_right = cv2.resize(frame_right, (640, 480))
+                        # Check if it needs conversion. 
+                        if self.mode == "hand": # Picamera2 (RGB)
+                            pass # Already RGB
+                        elif self.mode == "ai": # YOLO (BGR from cv2/modlib?)
+                             # Let's assume YOLO returns BGR like opencv
+                             frame_right = cv2.cvtColor(frame_right, cv2.COLOR_BGR2RGB)
 
-                    # Always flip display
-                    pygame.display.flip()
+                        surf = pygame.surfarray.make_surface(frame_right.swapaxes(0, 1))
+                        self.camera_screen.blit(surf, (640, 0))
+                    except: pass
+                else:
+                    # Draw Placeholder for Right
+                    pygame.draw.rect(self.camera_screen, (20, 20, 20), (640, 0, 640, 480))
+                    font = pygame.font.Font(None, 36)
+                    self.camera_screen.blit(font.render("No IMX500", True, (100, 100, 100)), (890, 220))
 
-            # Limit main loop to 30 FPS to reduce CPU
-            self.clock.tick(30)
+                # Draw Labels
+                font = pygame.font.Font(None, 30)
+                self.camera_screen.blit(font.render("USB Camera", True, (0, 255, 0)), (10, 10))
+                self.camera_screen.blit(font.render("IMX500 AI", True, (0, 255, 0)), (650, 10))
+                
+                pygame.display.flip()
 
+            self.clock.tick(config.FPS)
         self.cleanup()
 
     def cleanup(self):
-        if self.voice_thread:
-            self.voice_thread.stop()
-        if self.hand_tracker:
-            self.hand_tracker.release()
-        if self.yolo_tracker:
-            self.yolo_tracker.cleanup()
-        if self.servo:
-            self.servo.cleanup()
-        if self.gc9a01a:
-            self.gc9a01a.cleanup()
+        if self.voice_thread: self.voice_thread.stop()
+        if self.hand_tracker: self.hand_tracker.release()
+        if self.yolo_tracker: self.yolo_tracker.cleanup()
+        if self.secondary_cam:
+            if hasattr(self.secondary_cam, 'stop'): self.secondary_cam.stop()
+            elif hasattr(self.secondary_cam, 'release'): self.secondary_cam.release()
+        if self.display: self.display.cleanup()
         pygame.quit()
-
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='RoboEyes Hand-Eye Tracker')
-    parser.add_argument('--demo', action='store_true',
-                        help='Run in demo mode (no camera)')
-    parser.add_argument('--ai-camera', action='store_true',
-                        help='AI Camera mode: Uses IMX500 YOLO only (no USB webcam)')
-    parser.add_argument('--no-mediapipe', action='store_true',
-                        help='Use OpenCV instead of MediaPipe')
-    parser.add_argument('--camera', type=int, default=0,
-                        help='Camera device ID')
-    parser.add_argument('--no-camera-view', action='store_true',
-                        help='Hide camera view window on HDMI')
-    parser.add_argument('--no-tracking', action='store_true',
-                        help='Disable hand tracking (eyes wont follow hand)')
-    parser.add_argument('--yolo', action='store_true',
-                        help='Enable YOLO object detection (requires IMX500 AI Camera)')
-    parser.add_argument('--yolo-confidence', type=float, default=0.5,
-                        help='YOLO detection confidence threshold (0.0-1.0, default: 0.5)')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', choices=['hand', 'ai', 'demo'], default='hand', help='Operation mode')
+    parser.add_argument('--camera', type=int, default=0, help='Webcam ID (for hand mode)')
+    parser.add_argument('--no-view', action='store_true', help='Hide camera view')
     args = parser.parse_args()
 
-    if args.demo:
-        app = DemoMode()
-    elif args.ai_camera:
-        # AI Camera mode - Hand tracking with USB webcam
-        app = AICameraMode(
-            use_mediapipe=not args.no_mediapipe,
-            yolo_confidence=args.yolo_confidence
-        )
-    else:
-        app = RoboEyesHandTracker(
-            use_mediapipe=not args.no_mediapipe,
-            camera_id=args.camera,
-            show_camera=not args.no_camera_view,
-            enable_tracking=not args.no_tracking,
-            enable_yolo=args.yolo,
-            yolo_confidence=args.yolo_confidence
-        )
-
-    try:
-        app.run()
-    except KeyboardInterrupt:
-        print("\nStopped by user")
-        app.cleanup()
-
+    app = RoboEyesApp(mode=args.mode, camera_id=args.camera, show_camera=not args.no_view)
+    app.run()
 
 if __name__ == "__main__":
     main()

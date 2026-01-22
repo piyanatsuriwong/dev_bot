@@ -10,6 +10,12 @@
 - รองรับ 2 โหมด:
   - **MediaPipe** (แม่นยำ, ต้องติดตั้ง MediaPipe สำหรับ ARM64)
   - **OpenCV Skin Detection** (fallback, ไม่ต้องติดตั้ง MediaPipe)
+- **AI Camera Mode (IMX500)**:
+  - รองรับ YOLO object detection ด้วย IMX500 AI Camera
+  - ใช้ **YOLO11n** model (ตัวเลือกแรก) - ประสิทธิภาพดีกว่า YOLOv8n 37%
+  - Fallback เป็น **YOLOv8n** ถ้า YOLO11n ไม่มีใน system
+  - เหมาะสำหรับ embedded devices (ลด complexity, เพิ่ม accuracy)
+
 
 ## การติดตั้ง
 
@@ -55,21 +61,36 @@ pip3 install dist/*.whl --break-system-packages
 
 ## การใช้งาน
 
+### โหมดปกติ (Hand Tracking)
+
 ```bash
 cd ~/hand-eye-tracker
 ./run.sh
 
 # หรือ
-python3 main.py
+python3 main_roboeyes.py
 
 # บังคับใช้ OpenCV mode (ไม่ใช้ MediaPipe)
-python3 main.py --no-mediapipe
+python3 main_roboeyes.py --no-mediapipe
 
 # ระบุ camera
-python3 main.py --camera 0
+python3 main_roboeyes.py --camera 0
 ```
 
+### โหมด AI Camera (IMX500 YOLO Detection)
+
+```bash
+# เปิดใช้งาน AI Camera mode
+python3 main_roboeyes.py --ai-camera
+
+# ปรับค่า confidence threshold
+python3 main_roboeyes.py --ai-camera --yolo-confidence 0.6
+```
+
+**หมายเหตุ**: โปรแกรมจะเลือกใช้ **YOLO11n** โดยอัตโนมัติ (ถ้ามี) เพราะมีประสิทธิภาพดีกว่า YOLOv8n
+
 ## Controls
+
 
 | ปุ่ม | การทำงาน |
 |------|----------|
@@ -77,6 +98,9 @@ python3 main.py --camera 0
 | SPACE | เปลี่ยน emotion แบบสุ่ม |
 | W | เปิด/ปิดหน้าต่าง webcam |
 | ESC | ออกจากโปรแกรม |
+| **D** | **(AI Camera)** สลับไปโหมด DETECT (YOLO object detection) |
+| **T** | **(AI Camera)** สลับไปโหมด TRACK (Hand tracking) |
+
 
 ## โครงสร้างไฟล์
 

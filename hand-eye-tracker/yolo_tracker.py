@@ -16,14 +16,30 @@ from enum import Enum
 
 # Try to import modlib (AI Camera library)
 YOLO_AVAILABLE = False
+YOLO_MODEL_CLASS = None
 try:
     from modlib.devices import AiCamera
-    from modlib.models.zoo import YOLOv8n
     from modlib.apps import Annotator
     import numpy as np
     import cv2
+    
+    # Try to import YOLO11n first (newer, more efficient for IMX500)
+    # YOLO11n advantages:
+    # - 37% less complex than YOLOv8
+    # - Better accuracy and stability
+    # - Optimized for embedded devices
+    try:
+        from modlib.models.zoo import YOLO11n
+        YOLO_MODEL_CLASS = YOLO11n
+        model_name = "YOLO11n"
+    except ImportError:
+        # Fallback to YOLOv8n if YOLO11n not available
+        from modlib.models.zoo import YOLOv8n
+        YOLO_MODEL_CLASS = YOLOv8n
+        model_name = "YOLOv8n"
+    
     YOLO_AVAILABLE = True
-    print("YOLO (IMX500): Available")
+    print(f"YOLO (IMX500): Available - Using {model_name} model")
 except ImportError as e:
     print(f"YOLO (IMX500): Not available - {e}")
 
@@ -162,11 +178,12 @@ class YoloTracker:
     def _init_camera(self):
         """Initialize AI Camera and YOLO model"""
         try:
-            print("Loading YOLOv8n model...")
-            self.model = YOLOv8n()
+            print(f"Loading {model_name} model...")
+            self.model = YOLO_MODEL_CLASS()
             print(f"Model loaded! Classes: {len(self.model.labels)}")
 
             print("Initializing AI Camera and Deploying Model...")
+
             # Wait a bit to ensure previous device is fully released
             time.sleep(1.0)
             
@@ -175,9 +192,11 @@ class YoloTracker:
             device_initialized = False
             last_error = None
             
-            # Try indices 0 to 3
-            for cam_idx in [0, 1, 2, 3]:
+            # Try indices in this order: [1, 0, 2, 3]
+            # Start with 1 to avoid conflicts with picamera2's default camera (often 0)
+            for cam_idx in [1, 0, 2, 3]:
                 print(f"   - Testing Camera Index {cam_idx}...")
+                temp_device = None
                 try:
                     # 1. Initialize Device
                     temp_device = AiCamera(frame_rate=self.frame_rate, num=cam_idx)
@@ -193,11 +212,24 @@ class YoloTracker:
                     print(f"   [SUCCESS] Camera Index {cam_idx} is IMX500!")
                     break
                     
+                except KeyError as e:
+                    # Specific handling for picamera2 threading conflict
+                    print(f"     [Index {cam_idx}] KeyError (picamera2 conflict): {e}")
+                    last_error = e
+                    # Cleanup and try next index
+                    if temp_device:
+                        try:
+                            if hasattr(temp_device, 'close'): temp_device.close()
+                            elif hasattr(temp_device, '__exit__'): temp_device.__exit__(None, None, None)
+                        except: pass
+                    gc.collect()
+                    time.sleep(1.0)  # Wait longer for picamera2 to release
+                    
                 except Exception as e:
                     print(f"     [Index {cam_idx}] Failed: {e}")
                     last_error = e
                     # Cleanup failed device
-                    if 'temp_device' in locals() and temp_device:
+                    if temp_device:
                         try:
                             if hasattr(temp_device, 'close'): temp_device.close()
                             elif hasattr(temp_device, '__exit__'): temp_device.__exit__(None, None, None)
