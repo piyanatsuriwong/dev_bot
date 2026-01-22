@@ -73,14 +73,28 @@ class PiCamera:
         return False, None
 
     def release(self):
-        """Release camera resources"""
+        """Release camera resources - Force close to return camera to Available state"""
         if self.picam2:
             try:
+                # Stop camera first
                 self.picam2.stop()
-            except:
-                pass
+                # Then close to release resources and return to Available state
+                # This is critical for libcamera state management
+                if hasattr(self.picam2, 'close'):
+                    self.picam2.close()
+                    print("   [PiCamera] Picamera2 closed (returned to Available state)")
+                else:
+                    # Fallback: set to None to release reference
+                    self.picam2 = None
+            except Exception as e:
+                print(f"   [PiCamera] Error closing picamera2: {e}")
+                self.picam2 = None
         if self.cap:
-            self.cap.release()
+            try:
+                self.cap.release()
+            except Exception as e:
+                print(f"   [PiCamera] Error releasing OpenCV camera: {e}")
+            self.cap = None
 
     def isOpened(self):
         """Check if camera is opened"""

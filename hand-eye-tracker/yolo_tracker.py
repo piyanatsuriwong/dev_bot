@@ -248,6 +248,11 @@ class YoloTracker:
 
             self.annotator = Annotator()
             print("YOLO ready!")
+            
+            # Wait a bit for device to be fully ready before allowing acquisition
+            # This prevents "Camera in Configured state trying acquire() requiring state Available" error
+            time.sleep(1.0)
+            print("YOLO: Device ready for acquisition")
 
         except Exception as e:
             print(f"YOLO init error: {e}")
@@ -266,9 +271,16 @@ class YoloTracker:
             print("YOLO not available, cannot start")
             return False
 
+        # Ensure device is ready before starting thread
+        # This prevents race condition where thread tries to acquire before device is ready
+        if self.device is not None:
+            # Give device a moment to be fully ready
+            time.sleep(0.5)
+
         self._running = True
         self._thread = threading.Thread(target=self._detection_loop, daemon=True)
         self._thread.start()
+        print("YOLO: Detection thread started")
         return True
 
     def stop(self):
@@ -320,109 +332,141 @@ class YoloTracker:
     def _detection_loop(self):
         """Main detection loop (runs in thread) - Optimized like test_yolo_imx500.py"""
         try:
-            with self.device as stream:
-                for frame in stream:
-                    if not self._running:
+            # Wait a bit to ensure device is ready for acquisition
+            # This helps prevent "Camera in Configured state trying acquire() requiring state Available" error
+            # Device needs time to transition from Configured to Available state after deploy
+            time.sleep(1.0)
+            
+            print("YOLO: Acquiring camera stream...")
+            # Retry acquisition if it fails (device may need more time)
+            max_acquisition_retries = 3
+            acquisition_delay = 1.0
+            
+            for attempt in range(max_acquisition_retries):
+                try:
+                    with self.device as stream:
+                        print("YOLO: Camera stream acquired, starting detection loop")
+                        for frame in stream:
+                            if not self._running:
+                                break
+
+                            # Get current mode and target (thread-safe)
+                            with self._lock:
+                                current_mode = self._mode
+                                track_target = self._track_target
+
+                            # Get frame image first
+                            frame_image = frame.image
+
+                            # Filter detections by confidence (same as test_yolo_imx500.py)
+                            try:
+                                detections = frame.detections[
+                                    frame.detections.confidence > self.confidence_threshold
+                                ]
+                            except (TypeError, AttributeError):
+                                detections = []
+
+                            # Get frame dimensions ONCE (major optimization!)
+                            if frame_image is not None:
+                                frame_h, frame_w = frame_image.shape[:2]
+                            else:
+                                frame_h, frame_w = 480, 640
+
+                            # Create labels efficiently (like test_yolo_imx500.py)
+                            labels = []
+                            if len(detections) > 0:
+                                try:
+                                    labels = [
+                                        f"{self.model.labels[int(class_id)]}: {score:.2f}"
+                                        for _, score, class_id, _ in detections
+                                    ]
+                                    # Draw boxes
+                                    self.annotator.annotate_boxes(frame, detections, labels=labels)
+                                except (TypeError, ValueError) as e:
+                                    pass  # Skip if detection format is unexpected
+
+                            # Process detections for display and tracking
+                            tracked_pos = None
+                            processed = []
+
+                            # Iterate through detections (needed for display list and tracking)
+                            for det in detections:
+                                _, confidence, class_id, bbox = det
+                                class_id = int(class_id)
+                                label = self.model.labels[class_id] if class_id < len(self.model.labels) else "unknown"
+
+                                # Build processed list for display
+                                processed.append({
+                                    "label": label,
+                                    "confidence": float(confidence),
+                                    "bbox": bbox
+                                })
+
+                                # Track position (only find first matching target)
+                                if tracked_pos is None:
+                                    should_track = False
+                                    if current_mode == YoloMode.TRACK:
+                                        should_track = (label == track_target)
+                                    elif current_mode == YoloMode.TRACK_ALL:
+                                        should_track = True
+
+                                    if should_track:
+                                        x1, y1, x2, y2 = bbox
+                                        # Use pre-calculated frame dimensions
+                                        cx = ((x1 + x2) / 2) / frame_w
+                                        cy = ((y1 + y2) / 2) / frame_h
+                                        tracked_pos = (cx, cy)
+
+                            # Keep frame as RGB (don't convert - main loop expects RGB for pygame)
+                            frame_rgb = frame_image
+
+                            # Pre-calculate cached values BEFORE locking
+                            # This avoids doing expensive operations inside the lock
+                            if tracked_pos is not None:
+                                cached_pos = ((tracked_pos[0] - 0.5) * 2, (tracked_pos[1] - 0.5) * 2)
+                            else:
+                                cached_pos = (0, 0)
+
+                            # Pre-sort labels (do expensive sort outside lock)
+                            sorted_labels = [d["label"] for d in sorted(processed, key=lambda x: x["confidence"], reverse=True)[:3]]
+
+                            # Update shared state (quick operation)
+                            with self._lock:
+                                self._detections = processed
+                                self._latest_frame = frame_rgb
+                                self._tracked_position = tracked_pos
+
+                            # Update cached values atomically (no lock needed for simple assignments)
+                            self._cached_position = cached_pos
+                            self._cached_labels = sorted_labels
+
+                            # Calculate FPS
+                            self._frame_count += 1
+                            now = time.time()
+                            if now - self._last_time >= 1.0:
+                                self._fps = self._frame_count
+                                self._frame_count = 0
+                                self._last_time = now
+                        
+                        # Successfully acquired and processed, break retry loop
                         break
 
-                    # Get current mode and target (thread-safe)
-                    with self._lock:
-                        current_mode = self._mode
-                        track_target = self._track_target
-
-                    # Get frame image first
-                    frame_image = frame.image
-
-                    # Filter detections by confidence (same as test_yolo_imx500.py)
-                    try:
-                        detections = frame.detections[
-                            frame.detections.confidence > self.confidence_threshold
-                        ]
-                    except (TypeError, AttributeError):
-                        detections = []
-
-                    # Get frame dimensions ONCE (major optimization!)
-                    if frame_image is not None:
-                        frame_h, frame_w = frame_image.shape[:2]
+                except Exception as acquire_error:
+                    error_str = str(acquire_error)
+                    if "Configured state" in error_str or "Device or resource busy" in error_str:
+                        if attempt < max_acquisition_retries - 1:
+                            print(f"YOLO: Acquisition failed (attempt {attempt + 1}/{max_acquisition_retries}): {acquire_error}")
+                            print(f"   - Waiting {acquisition_delay}s before retry...")
+                            time.sleep(acquisition_delay)
+                            acquisition_delay *= 1.5  # Exponential backoff
+                            continue
+                        else:
+                            print(f"YOLO: All acquisition attempts failed: {acquire_error}")
+                            raise acquire_error
                     else:
-                        frame_h, frame_w = 480, 640
-
-                    # Create labels efficiently (like test_yolo_imx500.py)
-                    labels = []
-                    if len(detections) > 0:
-                        try:
-                            labels = [
-                                f"{self.model.labels[int(class_id)]}: {score:.2f}"
-                                for _, score, class_id, _ in detections
-                            ]
-                            # Draw boxes
-                            self.annotator.annotate_boxes(frame, detections, labels=labels)
-                        except (TypeError, ValueError) as e:
-                            pass  # Skip if detection format is unexpected
-
-                    # Process detections for display and tracking
-                    tracked_pos = None
-                    processed = []
-
-                    # Iterate through detections (needed for display list and tracking)
-                    for det in detections:
-                        _, confidence, class_id, bbox = det
-                        class_id = int(class_id)
-                        label = self.model.labels[class_id] if class_id < len(self.model.labels) else "unknown"
-
-                        # Build processed list for display
-                        processed.append({
-                            "label": label,
-                            "confidence": float(confidence),
-                            "bbox": bbox
-                        })
-
-                        # Track position (only find first matching target)
-                        if tracked_pos is None:
-                            should_track = False
-                            if current_mode == YoloMode.TRACK:
-                                should_track = (label == track_target)
-                            elif current_mode == YoloMode.TRACK_ALL:
-                                should_track = True
-
-                            if should_track:
-                                x1, y1, x2, y2 = bbox
-                                # Use pre-calculated frame dimensions
-                                cx = ((x1 + x2) / 2) / frame_w
-                                cy = ((y1 + y2) / 2) / frame_h
-                                tracked_pos = (cx, cy)
-
-                    # Keep frame as RGB (don't convert - main loop expects RGB for pygame)
-                    frame_rgb = frame_image
-
-                    # Pre-calculate cached values BEFORE locking
-                    # This avoids doing expensive operations inside the lock
-                    if tracked_pos is not None:
-                        cached_pos = ((tracked_pos[0] - 0.5) * 2, (tracked_pos[1] - 0.5) * 2)
-                    else:
-                        cached_pos = (0, 0)
-
-                    # Pre-sort labels (do expensive sort outside lock)
-                    sorted_labels = [d["label"] for d in sorted(processed, key=lambda x: x["confidence"], reverse=True)[:3]]
-
-                    # Update shared state (quick operation)
-                    with self._lock:
-                        self._detections = processed
-                        self._latest_frame = frame_rgb
-                        self._tracked_position = tracked_pos
-
-                    # Update cached values atomically (no lock needed for simple assignments)
-                    self._cached_position = cached_pos
-                    self._cached_labels = sorted_labels
-
-                    # Calculate FPS
-                    self._frame_count += 1
-                    now = time.time()
-                    if now - self._last_time >= 1.0:
-                        self._fps = self._frame_count
-                        self._frame_count = 0
-                        self._last_time = now
-
+                        # Different error, don't retry
+                        raise acquire_error
+                        
         except Exception as e:
             print(f"YOLO detection error: {e}")
         finally:

@@ -23,6 +23,14 @@ import signal
 import shutil
 from PIL import Image, ImageDraw, ImageFont
 
+# Import psutil for better process management
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("Warning: psutil not available - using fallback process management")
+
 # Monkey patch shutil.which to force SpeechRecognition to use WAV
 # This prevents "FLAC conversion utility not available" error
 original_which = shutil.which
@@ -420,8 +428,31 @@ class HandTrackerMediaPipe:
         return norm_x, norm_y
 
     def release(self):
-        self.cap.release()
-        self.hands.close()
+        """Release camera resources - Force close to return camera to Available state"""
+        print("   [HandTracker] Releasing MediaPipe Hand Tracker...")
+        
+        # แก้ไข: ต้องสั่ง close() เพื่อคืน resource ให้ libcamera
+        if self.cap is not None:
+            if hasattr(self.cap, 'close'):
+                print("   [HandTracker] Closing Picamera2 device...")
+                try:
+                    self.cap.close()
+                except Exception as e:
+                    print(f"   [HandTracker] Error closing: {e}")
+            elif hasattr(self.cap, 'release'):
+                self.cap.release()
+            
+            # ป้องกันการเรียกซ้ำ
+            self.cap = None
+        
+        if hasattr(self, 'hands') and self.hands is not None:
+            try:
+                self.hands.close()
+            except Exception as e:
+                print(f"   [HandTracker] Error closing MediaPipe hands: {e}")
+            self.hands = None
+        
+        print("   [HandTracker] MediaPipe Hand Tracker released")
 
 
 class HandTrackerOpenCV:
@@ -542,7 +573,23 @@ class HandTrackerOpenCV:
         return norm_x, norm_y
 
     def release(self):
-        self.cap.release()
+        """Release camera resources - Force close to return camera to Available state"""
+        print("   [HandTracker] Releasing OpenCV Hand Tracker...")
+        
+        if self.cap is not None:
+            if hasattr(self.cap, 'close'):
+                print("   [HandTracker] Closing Picamera2 device...")
+                try:
+                    self.cap.close()
+                except Exception as e:
+                    print(f"   [HandTracker] Error closing: {e}")
+            elif hasattr(self.cap, 'release'):
+                self.cap.release()
+            
+            # ป้องกันการเรียกซ้ำ
+            self.cap = None
+        
+        print("   [HandTracker] OpenCV Hand Tracker released")
 
 
 class RoboEyesHandTracker:
@@ -1019,53 +1066,295 @@ class DemoMode:
             self.gc9a01a.cleanup()
         pygame.quit()
 
+class CameraResourceManager:
+    """
+    จัดการ Camera Resources ด้วย psutil
+    - ตรวจสอบ process ที่ใช้กล้อง
+    - Kill zombie processes อย่างปลอดภัย
+    - Force cleanup ด้วย garbage collection
+    """
+
+    # Video device paths บน Raspberry Pi
+    VIDEO_DEVICES = [
+        "/dev/video0",
+        "/dev/video1",
+        "/dev/video2",
+        "/dev/video3",
+        "/dev/video4",
+        "/dev/video10",
+        "/dev/video11",
+        "/dev/video12",
+    ]
+
+    @staticmethod
+    def get_processes_using_camera(device_paths=None):
+        """
+        หา process ทั้งหมดที่ใช้กล้อง
+
+        Args:
+            device_paths: List of device paths to check (default: all video devices)
+
+        Returns:
+            Dict[int, Dict]: {pid: {"name": str, "files": list, "is_self": bool}}
+        """
+        if not PSUTIL_AVAILABLE:
+            return {}
+
+        if device_paths is None:
+            device_paths = CameraResourceManager.VIDEO_DEVICES
+
+        my_pid = os.getpid()
+        camera_processes = {}
+
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                pid = proc.info['pid']
+                name = proc.info['name']
+
+                # Get open files for this process
+                try:
+                    open_files = proc.open_files()
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    continue
+
+                # Check if any open file is a video device
+                camera_files = []
+                for f in open_files:
+                    if any(dev in f.path for dev in device_paths):
+                        camera_files.append(f.path)
+
+                if camera_files:
+                    camera_processes[pid] = {
+                        "name": name,
+                        "files": camera_files,
+                        "is_self": (pid == my_pid)
+                    }
+
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+
+        return camera_processes
+
+    @staticmethod
+    def kill_camera_blockers(device_paths=None, force=False, timeout=3.0):
+        """
+        Kill processes ที่ block กล้อง (ยกเว้นตัวเอง)
+
+        Args:
+            device_paths: List of device paths to check
+            force: ถ้า True จะ SIGKILL ทันที, ถ้า False จะ SIGTERM ก่อนแล้วค่อย SIGKILL
+            timeout: เวลารอหลัง SIGTERM ก่อน SIGKILL (วินาที)
+
+        Returns:
+            int: จำนวน process ที่ถูก kill
+        """
+        if not PSUTIL_AVAILABLE:
+            print("   [WARNING] psutil not available, using fallback...")
+            CameraResourceManager._fallback_kill_camera_blockers(device_paths)
+            return 0
+
+        processes = CameraResourceManager.get_processes_using_camera(device_paths)
+        killed_count = 0
+
+        for pid, info in processes.items():
+            if info["is_self"]:
+                print(f"   [SELF] PID {pid} ({info['name']}) - using {info['files']}")
+                print("   -> Running internal GC instead of killing...")
+                gc.collect()
+                continue
+
+            print(f"   [BLOCKER] PID {pid} ({info['name']}) - using {info['files']}")
+
+            try:
+                proc = psutil.Process(pid)
+
+                if force:
+                    # Force kill immediately
+                    proc.kill()
+                    print(f"   [KILLED] PID {pid} (SIGKILL)")
+                else:
+                    # Graceful termination first
+                    proc.terminate()
+                    print(f"   [TERM] PID {pid} - waiting {timeout}s...")
+
+                    try:
+                        proc.wait(timeout=timeout)
+                        print(f"   [TERMINATED] PID {pid}")
+                    except psutil.TimeoutExpired:
+                        # Force kill if not terminated
+                        proc.kill()
+                        print(f"   [KILLED] PID {pid} (SIGKILL after timeout)")
+
+                killed_count += 1
+
+            except psutil.NoSuchProcess:
+                print(f"   [GONE] PID {pid} already terminated")
+            except psutil.AccessDenied:
+                print(f"   [DENIED] No permission to kill PID {pid}")
+            except Exception as e:
+                print(f"   [ERROR] Failed to kill PID {pid}: {e}")
+
+        return killed_count
+
+    @staticmethod
+    def _fallback_kill_camera_blockers(device_paths=None):
+        """Fallback method using fuser command when psutil is not available"""
+        if device_paths is None:
+            device_paths = ["/dev/video0", "/dev/video4"]
+
+        for device_path in device_paths:
+            try:
+                result = subprocess.check_output(
+                    f"fuser {device_path} 2>/dev/null",
+                    shell=True,
+                    stderr=subprocess.DEVNULL
+                )
+                pids = [int(p) for p in result.decode().strip().split()]
+                my_pid = os.getpid()
+
+                for pid in pids:
+                    if pid != my_pid:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                            print(f"   [KILLED] PID {pid} via fuser")
+                        except Exception as e:
+                            print(f"   [ERROR] Could not kill PID {pid}: {e}")
+
+            except subprocess.CalledProcessError:
+                pass
+            except Exception:
+                pass
+
+    @staticmethod
+    def force_gc_cleanup():
+        """Force garbage collection and return collected count"""
+        collected = gc.collect()
+        if collected > 0:
+            print(f"   [GC] Collected {collected} objects")
+        return collected
+
+    @staticmethod
+    def wait_for_device_release(device_paths=None, timeout=5.0, check_interval=0.5):
+        """
+        รอจนกว่ากล้องจะ free หรือ timeout
+
+        Args:
+            device_paths: List of device paths to check
+            timeout: Maximum wait time (seconds)
+            check_interval: Time between checks (seconds)
+
+        Returns:
+            bool: True if device is free, False if timeout
+        """
+        if not PSUTIL_AVAILABLE:
+            time.sleep(timeout)
+            return True
+
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            processes = CameraResourceManager.get_processes_using_camera(device_paths)
+
+            # Filter out self
+            other_processes = {pid: info for pid, info in processes.items() if not info["is_self"]}
+
+            if not other_processes:
+                print(f"   [FREE] Camera devices are now available")
+                return True
+
+            print(f"   [WAIT] {len(other_processes)} process(es) still using camera...")
+            time.sleep(check_interval)
+
+        print(f"   [TIMEOUT] Camera not released after {timeout}s")
+        return False
+
+    @staticmethod
+    def comprehensive_cleanup(device_paths=None, force_kill=True, wait_timeout=3.0):
+        """
+        Comprehensive camera cleanup - ใช้ตอนสลับ mode
+
+        Steps:
+        1. Force GC to release Python objects
+        2. Find and kill blocking processes
+        3. Wait for device to be released
+        4. Final GC
+
+        Args:
+            device_paths: List of device paths
+            force_kill: Whether to force kill (SIGKILL) blocking processes
+            wait_timeout: Timeout for waiting device release
+
+        Returns:
+            bool: True if cleanup successful
+        """
+        print("   [CLEANUP] Starting comprehensive camera cleanup...")
+
+        # Step 1: Initial GC
+        CameraResourceManager.force_gc_cleanup()
+
+        # Step 2: Kill blockers
+        killed = CameraResourceManager.kill_camera_blockers(device_paths, force=force_kill)
+        if killed > 0:
+            print(f"   [CLEANUP] Killed {killed} blocking process(es)")
+
+        # Step 3: Wait for release
+        time.sleep(0.5)  # Short delay after killing
+        released = CameraResourceManager.wait_for_device_release(device_paths, timeout=wait_timeout)
+
+        # Step 4: Final GC
+        CameraResourceManager.force_gc_cleanup()
+
+        print(f"   [CLEANUP] Complete (released={released})")
+        return released
+
+
 def force_clear_camera(device_path="/dev/video0"):
     """
-    ตรวจสอบว่ามีใครแย่งใช้กล้องอยู่ไหม
+    ตรวจสอบว่ามีใครแย่งใช้กล้องอยู่ไหม (Legacy function - uses CameraResourceManager)
     - ถ้าเป็นคนอื่น -> สั่ง Kill ทันที
     - ถ้าเป็นตัวเอง -> สั่ง Garbage Collection เพื่อบังคับคืนค่า
-    
+
     Args:
         device_path: Path to camera device (default: /dev/video0)
     """
     print(f"   - Checking camera blockers on {device_path}...")
-    
-    # 1. ลองใช้คำสั่ง fuser หาว่าใครใช้กล้องอยู่
-    try:
-        # ดึง PID ของคนที่ใช้กล้อง (ต้องลง fuser: sudo apt install psmisc)
-        # ถ้าไม่มี fuser อาจจะข้ามขั้นตอนนี้ไป
-        result = subprocess.check_output(
-            f"fuser {device_path} 2>/dev/null", 
-            shell=True, 
-            stderr=subprocess.DEVNULL
-        )
-        pids = [int(p) for p in result.decode().strip().split()]
-        
-        my_pid = os.getpid()
-        
-        for pid in pids:
-            if pid != my_pid:
-                print(f"   !!! Killing zombie process {pid} blocking camera...")
-                try:
-                    os.kill(pid, signal.SIGKILL)  # ฆ่า Process อื่นทิ้งทันที
-                    print(f"   [SUCCESS] Killed process {pid}")
-                except ProcessLookupError:
-                    print(f"   [INFO] Process {pid} already terminated")
-                except PermissionError:
-                    print(f"   [WARNING] No permission to kill process {pid}")
-                except Exception as e:
-                    print(f"   [WARNING] Error killing process {pid}: {e}")
-            else:
-                print("   (Camera is held by this application. Running internal GC...)")
-                
-    except subprocess.CalledProcessError:
-        # ไม่มีใครใช้กล้อง หรือไม่มีคำสั่ง fuser
-        print("   (No processes using camera or fuser not available)")
-    except Exception as e:
-        # Error อื่นๆ (เช่น fuser ไม่มี)
-        print(f"   (Could not check camera usage: {e})")
 
-    # 2. บังคับ Internal Clean (เหมือนที่ทำก่อนหน้านี้)
+    if PSUTIL_AVAILABLE:
+        # Use psutil-based cleanup
+        CameraResourceManager.kill_camera_blockers([device_path], force=True)
+    else:
+        # Fallback to fuser
+        try:
+            result = subprocess.check_output(
+                f"fuser {device_path} 2>/dev/null",
+                shell=True,
+                stderr=subprocess.DEVNULL
+            )
+            pids = [int(p) for p in result.decode().strip().split()]
+
+            my_pid = os.getpid()
+
+            for pid in pids:
+                if pid != my_pid:
+                    print(f"   !!! Killing zombie process {pid} blocking camera...")
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        print(f"   [SUCCESS] Killed process {pid}")
+                    except ProcessLookupError:
+                        print(f"   [INFO] Process {pid} already terminated")
+                    except PermissionError:
+                        print(f"   [WARNING] No permission to kill process {pid}")
+                    except Exception as e:
+                        print(f"   [WARNING] Error killing process {pid}: {e}")
+                else:
+                    print("   (Camera is held by this application. Running internal GC...)")
+
+        except subprocess.CalledProcessError:
+            print("   (No processes using camera or fuser not available)")
+        except Exception as e:
+            print(f"   (Could not check camera usage: {e})")
+
+    # บังคับ Internal Clean
     collected = gc.collect()
     if collected > 0:
         print(f"   - GC collected {collected} objects")
@@ -1193,7 +1482,19 @@ class AICameraMode:
             # Switch to DETECT mode (YOLO)
             if self.current_mode != "DETECT":
                 print("\n[Mode Switch] Switching to DETECT (YOLO) via voice...")
-                # Cleanup existing YOLO tracker if any
+                
+                # 1. RELEASE HAND TRACKER (สำคัญมาก! ต้องปล่อยกล้องก่อน)
+                if self.hand_tracker is not None:
+                    print("   - Releasing Hand Tracker (USB webcam)...")
+                    try:
+                        self.hand_tracker.release()
+                        print("   [SUCCESS] Hand Tracker released")
+                    except Exception as e:
+                        print(f"   ! Release warning: {e}")
+                    self.hand_tracker = None
+                    gc.collect()
+                
+                # 2. Cleanup existing YOLO tracker if any
                 if self.yolo_tracker is not None:
                     print("   - Cleaning up existing tracker...")
                     try:
@@ -1201,12 +1502,17 @@ class AICameraMode:
                     except Exception as e:
                         print(f"   ! Cleanup warning: {e}")
                     self.yolo_tracker = None
-                    gc.collect()
-                    time.sleep(3.0)  # Wait for device to fully release
-                
+
+                # 3. Use CameraResourceManager for comprehensive cleanup
+                CameraResourceManager.comprehensive_cleanup(
+                    device_paths=["/dev/video0", "/dev/video4"],
+                    force_kill=True,
+                    wait_timeout=3.0
+                )
+
                 self.current_mode = "DETECT"
                 print("   - Initializing IMX500...")
-                
+
                 # Initialize YOLO if available
                 if YOLO_AVAILABLE:
                     try:
@@ -1235,7 +1541,8 @@ class AICameraMode:
             # Switch to TRACK mode (Hand)
             if self.current_mode != "TRACK":
                 print("\n[Mode Switch] Switching to TRACK (Hand) via voice...")
-                # Cleanup YOLO tracker when switching away from DETECT mode
+                
+                # 1. Cleanup YOLO tracker when switching away from DETECT mode
                 if self.yolo_tracker is not None:
                     print("   - Cleaning up YOLO tracker...")
                     try:
@@ -1243,8 +1550,26 @@ class AICameraMode:
                     except Exception as e:
                         print(f"   ! Cleanup warning: {e}")
                     self.yolo_tracker = None
-                    gc.collect()
-                    time.sleep(1.0)
+                
+                # 2. Use CameraResourceManager for cleanup
+                CameraResourceManager.comprehensive_cleanup(
+                    device_paths=["/dev/video0", "/dev/video4"],
+                    force_kill=False,
+                    wait_timeout=2.0
+                )
+                
+                # 3. สร้าง Hand Tracker ใหม่ (สำคัญมาก! ต้องสร้างใหม่)
+                if self.hand_tracker is None:
+                    print("   - Initializing Hand Tracker (USB webcam)...")
+                    try:
+                        if self.use_mediapipe and MEDIAPIPE_AVAILABLE:
+                            self.hand_tracker = HandTrackerMediaPipe(camera_id=0)
+                            print("   [SUCCESS] Hand Tracker (MediaPipe) initialized")
+                        else:
+                            self.hand_tracker = HandTrackerOpenCV(camera_id=0)
+                            print("   [SUCCESS] Hand Tracker (OpenCV) initialized")
+                    except Exception as e:
+                        print(f"   [ERROR] Failed to initialize Hand Tracker: {e}")
                 
                 self.current_mode = "TRACK"
                 print("   [SUCCESS] Switched to TRACK mode")
@@ -1329,83 +1654,79 @@ class AICameraMode:
                         # === Switch to DETECT mode (YOLO) ===
                         if self.current_mode != "DETECT":
                             print("\n[Mode Switch] Switching to DETECT (YOLO)...")
-                            
-                            # 1. CLEANUP: ล้าง Tracker เก่าแบบหมดจด
+
+                            # 1. RELEASE HAND TRACKER (สำคัญมาก! ต้องปล่อยกล้องก่อน)
+                            if self.hand_tracker is not None:
+                                print("   - Releasing Hand Tracker (USB webcam)...")
+                                try:
+                                    self.hand_tracker.release()
+                                    print("   [SUCCESS] Hand Tracker released")
+                                except Exception as e:
+                                    print(f"   ! Release warning: {e}")
+                                self.hand_tracker = None
+                                gc.collect()
+
+                            # 2. CLEANUP: ล้าง YOLO Tracker เก่าแบบหมดจด
                             if self.yolo_tracker is not None:
-                                print("   - Cleaning up existing tracker...")
+                                print("   - Cleaning up existing YOLO tracker...")
                                 try:
                                     self.yolo_tracker.cleanup()
                                 except Exception as e:
                                     print(f"   ! Cleanup warning: {e}")
-                                
+
                                 self.yolo_tracker = None
-                            
-                            # 2. เรียกใช้ฟังก์ชัน FORCE CLEAR ที่สร้างใหม่
-                            # IMX500 อยู่ที่ /dev/video0 หรือ video4 (Pi 5)
-                            # ลองทั้งสองตัวเพื่อความชัวร์
-                            force_clear_camera("/dev/video0")
-                            force_clear_camera("/dev/video4")
-                            
-                            print("   - Waiting for device release...")
-                            time.sleep(2.0)  # รอ hardware นิดนึง
+
+                            # 3. ใช้ CameraResourceManager แทน force_clear_camera
+                            # Comprehensive cleanup: kill blockers, GC, wait for release
+                            CameraResourceManager.comprehensive_cleanup(
+                                device_paths=["/dev/video0", "/dev/video4"],
+                                force_kill=True,
+                                wait_timeout=3.0
+                            )
                             
                             self.current_mode = "DETECT"
-                            
-                            # 3. INITIALIZE: สร้าง Tracker ใหม่
+
+                            # 3. INITIALIZE: สร้าง Tracker ใหม่ (with retry)
                             if YOLO_AVAILABLE:
-                                try:
-                                    print("   - Initializing IMX500...")
-                                    self.yolo_tracker = create_yolo_tracker(
-                                        confidence_threshold=self.yolo_confidence,
-                                        frame_rate=30
-                                    )
-                                    # เช็คว่าสร้าง device สำเร็จไหม
-                                    if self.yolo_tracker and self.yolo_tracker.device:
-                                        self.yolo_tracker.start()
-                                        self.yolo_tracker.set_mode(YoloMode.DETECT)
-                                        print("   [SUCCESS] YOLO Started")
-                                    else:
-                                        raise Exception("Device is None after init")
-                                        
-                                except Exception as e:
-                                    print(f"   [ERROR] Failed to start YOLO: {e}")
-                                    print("   ! Retrying in 5 seconds (device may need more time to release)...")
-                                    # Retry Logic - Cleanup more thoroughly
-                                    if self.yolo_tracker:
-                                        try: 
-                                            self.yolo_tracker.cleanup()
-                                        except Exception as cleanup_err:
-                                            print(f"   ! Cleanup error: {cleanup_err}")
-                                    self.yolo_tracker = None
-                                    # Force garbage collection
-                                    collected = gc.collect()
-                                    if collected > 0:
-                                        print(f"   - GC collected {collected} objects")
-                                    # Wait longer for device to fully release
-                                    time.sleep(5.0)  # เพิ่ม delay เป็น 5 วินาที
-                                    
+                                max_retries = 2
+                                for attempt in range(max_retries):
                                     try:
-                                        print("   - Retrying IMX500 initialization...")
+                                        if attempt > 0:
+                                            print(f"   - Retry attempt {attempt + 1}/{max_retries}...")
+                                            # Additional cleanup before retry
+                                            CameraResourceManager.comprehensive_cleanup(
+                                                device_paths=["/dev/video0", "/dev/video4"],
+                                                force_kill=True,
+                                                wait_timeout=5.0
+                                            )
+
+                                        print("   - Initializing IMX500...")
                                         self.yolo_tracker = create_yolo_tracker(
                                             confidence_threshold=self.yolo_confidence,
                                             frame_rate=30
                                         )
                                         # เช็คว่าสร้าง device สำเร็จไหม
                                         if self.yolo_tracker and self.yolo_tracker.device:
-                                            if self.yolo_tracker.start():
-                                                self.yolo_tracker.set_mode(YoloMode.DETECT)
-                                                print("   [SUCCESS] YOLO Started (Retry)")
-                                            else:
-                                                raise Exception("start() returned False")
+                                            self.yolo_tracker.start()
+                                            self.yolo_tracker.set_mode(YoloMode.DETECT)
+                                            print("   [SUCCESS] YOLO Started")
+                                            break  # Success, exit retry loop
                                         else:
-                                            raise Exception("Device is None after retry init")
-                                    except Exception as e2:
-                                        print(f"   [FATAL] Retry failed: {e2}")
+                                            raise Exception("Device is None after init")
+
+                                    except Exception as e:
+                                        print(f"   [ERROR] Attempt {attempt + 1} failed: {e}")
+                                        # Cleanup failed tracker
                                         if self.yolo_tracker:
-                                            try: self.yolo_tracker.cleanup()
-                                            except: pass
+                                            try:
+                                                self.yolo_tracker.cleanup()
+                                            except Exception as cleanup_err:
+                                                print(f"   ! Cleanup error: {cleanup_err}")
                                         self.yolo_tracker = None
-                                        self.current_mode = "TRACK" # Fallback กลับไปโหมดมือ
+
+                                        if attempt == max_retries - 1:
+                                            print("   [FATAL] All retry attempts failed")
+                                            self.current_mode = "TRACK"  # Fallback
                             else:
                                 print("   [ERROR] YOLO not available")
                                 self.current_mode = "TRACK"
@@ -1413,19 +1734,37 @@ class AICameraMode:
                         # === Switch to TRACK mode (Hand) ===
                         if self.current_mode != "TRACK":
                             print("\n[Mode Switch] Switching to TRACK (Hand)...")
-                            
-                            # Cleanup YOLO เพื่อคืนกล้องให้ระบบ
+
+                            # 1. Cleanup YOLO เพื่อคืนกล้องให้ระบบ
                             if self.yolo_tracker is not None:
                                 print("   - Cleaning up YOLO tracker...")
                                 try:
                                     self.yolo_tracker.cleanup()
                                 except Exception as e:
                                     print(f"   ! Cleanup warning: {e}")
-                                
+
                                 self.yolo_tracker = None
-                                gc.collect() # สำคัญมาก
-                                time.sleep(1.0)
-                            
+
+                            # 2. Use CameraResourceManager for cleanup
+                            CameraResourceManager.comprehensive_cleanup(
+                                device_paths=["/dev/video0", "/dev/video4"],
+                                force_kill=False,  # Graceful termination for TRACK mode
+                                wait_timeout=2.0
+                            )
+
+                            # 3. สร้าง Hand Tracker ใหม่ (สำคัญมาก! ต้องสร้างใหม่)
+                            if self.hand_tracker is None:
+                                print("   - Initializing Hand Tracker (USB webcam)...")
+                                try:
+                                    if self.use_mediapipe and MEDIAPIPE_AVAILABLE:
+                                        self.hand_tracker = HandTrackerMediaPipe(camera_id=0)
+                                        print("   [SUCCESS] Hand Tracker (MediaPipe) initialized")
+                                    else:
+                                        self.hand_tracker = HandTrackerOpenCV(camera_id=0)
+                                        print("   [SUCCESS] Hand Tracker (OpenCV) initialized")
+                                except Exception as e:
+                                    print(f"   [ERROR] Failed to initialize Hand Tracker: {e}")
+
                             self.current_mode = "TRACK"
                             print("   [SUCCESS] Switched to TRACK mode")
 
