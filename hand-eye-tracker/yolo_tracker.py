@@ -85,7 +85,7 @@ class YoloTracker:
         "ตุ๊กตาหมี": "teddy bear",
     }
 
-    def __init__(self, confidence_threshold=0.5, frame_rate=30):
+    def __init__(self, confidence_threshold=0.5, frame_rate=10):
         """
         Initialize YOLO tracker
 
@@ -166,104 +166,58 @@ class YoloTracker:
             self.model = YOLOv8n()
             print(f"Model loaded! Classes: {len(self.model.labels)}")
 
-            print("Initializing AI Camera...")
+            print("Initializing AI Camera and Deploying Model...")
             # Wait a bit to ensure previous device is fully released
-            # This helps when switching modes quickly
             time.sleep(1.0)
             
-            # Try camera num=0 first, if fails try num=1 (when multiple cameras)
+            # Try to find the correct camera index by iterating
+            # We must try to DEPLOY to confirm it's the IMX500
             device_initialized = False
-            max_retries = 3
-            retry_delay = 2.0
+            last_error = None
             
-            for attempt in range(max_retries):
+            # Try indices 0 to 3
+            for cam_idx in [0, 1, 2, 3]:
+                print(f"   - Testing Camera Index {cam_idx}...")
                 try:
-                    if attempt > 0:
-                        print(f"   - Retry attempt {attempt + 1}/{max_retries}...")
-                        time.sleep(retry_delay)
+                    # 1. Initialize Device
+                    temp_device = AiCamera(frame_rate=self.frame_rate, num=cam_idx)
                     
-                    self.device = AiCamera(frame_rate=self.frame_rate, num=0)
+                    # 2. Try to Deploy (The real test)
+                    print(f"     [Index {cam_idx}] Attempting deploy...")
+                    temp_device.deploy(self.model)
+                    
+                    # If we get here, it worked!
+                    self.device = temp_device
+                    self.annotator = Annotator()
                     device_initialized = True
+                    print(f"   [SUCCESS] Camera Index {cam_idx} is IMX500!")
                     break
-                except Exception as e0:
-                    if attempt < max_retries - 1:
-                        print(f"   - Camera 0 failed (attempt {attempt + 1}): {e0}")
-                        # Cleanup and retry
-                        if self.device:
-                            try:
-                                if hasattr(self.device, 'close'):
-                                    self.device.close()
-                                elif hasattr(self.device, '__exit__'):
-                                    self.device.__exit__(None, None, None)
-                            except:
-                                pass
-                            self.device = None
-                        gc.collect()
-                    else:
-                        # Last attempt failed, try camera 1
-                        print(f"Camera 0 failed after {max_retries} attempts: {e0}, trying camera 1...")
+                    
+                except Exception as e:
+                    print(f"     [Index {cam_idx}] Failed: {e}")
+                    last_error = e
+                    # Cleanup failed device
+                    if 'temp_device' in locals() and temp_device:
                         try:
-                            self.device = AiCamera(frame_rate=self.frame_rate, num=1)
-                            device_initialized = True
-                        except Exception as e1:
-                            print(f"Camera 1 also failed: {e1}")
-                            raise e1
+                            if hasattr(temp_device, 'close'): temp_device.close()
+                            elif hasattr(temp_device, '__exit__'): temp_device.__exit__(None, None, None)
+                        except: pass
+                    gc.collect()
+                    time.sleep(0.5)
 
             if not device_initialized:
+                print(f"   [ERROR] Could not find IMX500 on any index. Last error: {last_error}")
                 self.device = None
                 return
 
-            print("Deploying model to IMX500...")
-            print("(First time may take 1-2 minutes for firmware upload)")
-            try:
-                self.device.deploy(self.model)
-            except Exception as deploy_error:
-                # If deploy fails, cleanup device immediately and thoroughly
-                print(f"Deploy failed: {deploy_error}")
-                device_ref = self.device
-                self.device = None  # Clear reference first
-                
-                try:
-                    if device_ref is not None:
-                        if hasattr(device_ref, 'close'):
-                            device_ref.close()
-                            print("   - Device closed via close()")
-                        elif hasattr(device_ref, '__exit__'):
-                            device_ref.__exit__(None, None, None)
-                            print("   - Device closed via __exit__()")
-                except Exception as close_err:
-                    print(f"   ! Error closing device: {close_err}")
-                
-                # Force garbage collection to release resources
-                collected = gc.collect()
-                if collected > 0:
-                    print(f"   - GC collected {collected} objects")
-                
-                # Give OS time to release device resources
-                # IMX500 may need more time to fully release
-                print("   - Waiting for device to fully release...")
-                time.sleep(2.0)
-                
-                raise deploy_error
-
-            self.annotator = Annotator()
             print("YOLO ready!")
             
             # Wait a bit for device to be fully ready before allowing acquisition
-            # This prevents "Camera in Configured state trying acquire() requiring state Available" error
             time.sleep(1.0)
             print("YOLO: Device ready for acquisition")
 
         except Exception as e:
             print(f"YOLO init error: {e}")
-            # Ensure device is cleared
-            if self.device is not None:
-                try:
-                    if hasattr(self.device, 'close'):
-                        self.device.close()
-                except:
-                    pass
-            self.device = None
 
     def start(self):
         """Start detection thread"""
@@ -330,35 +284,55 @@ class YoloTracker:
             print(f"YOLO cleanup warning: {e}")
 
     def _detection_loop(self):
-        """Main detection loop (runs in thread) - Optimized like test_yolo_imx500.py"""
-        try:
-            # Wait a bit to ensure device is ready for acquisition
-            # This helps prevent "Camera in Configured state trying acquire() requiring state Available" error
-            # Device needs time to transition from Configured to Available state after deploy
-            time.sleep(1.0)
-            
-            print("YOLO: Acquiring camera stream...")
-            # Retry acquisition if it fails (device may need more time)
-            max_acquisition_retries = 3
-            acquisition_delay = 1.0
-            
-            for attempt in range(max_acquisition_retries):
+        """Main detection loop with Auto-Recovery"""
+        
+        # Loop หลัก: จะทำงานตลอดจนกว่าจะสั่ง stop()
+        while self._running:
+            try:
+                # 1. ตรวจสอบสถานะ Device ก่อนเริ่ม
+                if self.device is None:
+                    print("YOLO: Device is None, attempting to initialize...")
+                    try:
+                        self._init_camera()
+                    except Exception as e:
+                        print(f"YOLO: Init failed ({e}), waiting 2s...")
+                        time.sleep(2.0)
+                        continue
+
+                # 2. เริ่ม Acquire Stream
+                print("YOLO: Acquiring camera stream...")
+                
+                # ใช้ try-except ครอบการ Stream ทั้งหมด
                 try:
+                    # รอสักนิดเพื่อให้ Device พร้อม (สำคัญมากสำหรับ IMX500)
+                    time.sleep(1.0)
+                    
                     with self.device as stream:
-                        print("YOLO: Camera stream acquired, starting detection loop")
+                        print("YOLO: Stream acquired! Starting process...")
+                        
+                        # Loop ย่อย: อ่านภาพทีละเฟรม
                         for frame in stream:
+                            # เช็คว่ายังต้องรันอยู่ไหม
                             if not self._running:
                                 break
+                                
+                            start_time = time.time()
+
+                            # --- ส่วนประมวลผล ---
+                            frame_image = frame.image
+                            
+                            # ป้องกัน FPS พุ่ง (ถ้าภาพมา null)
+                            if frame_image is None:
+                                print("YOLO: Warning - Received empty frame")
+                                time.sleep(0.1)
+                                continue
 
                             # Get current mode and target (thread-safe)
                             with self._lock:
                                 current_mode = self._mode
                                 track_target = self._track_target
 
-                            # Get frame image first
-                            frame_image = frame.image
-
-                            # Filter detections by confidence (same as test_yolo_imx500.py)
+                            # Filter detections by confidence
                             try:
                                 detections = frame.detections[
                                     frame.detections.confidence > self.confidence_threshold
@@ -366,43 +340,31 @@ class YoloTracker:
                             except (TypeError, AttributeError):
                                 detections = []
 
-                            # Get frame dimensions ONCE (major optimization!)
+                            # Get frame dimensions
                             if frame_image is not None:
                                 frame_h, frame_w = frame_image.shape[:2]
                             else:
                                 frame_h, frame_w = 480, 640
 
-                            # Create labels efficiently (like test_yolo_imx500.py)
-                            labels = []
-                            if len(detections) > 0:
-                                try:
-                                    labels = [
-                                        f"{self.model.labels[int(class_id)]}: {score:.2f}"
-                                        for _, score, class_id, _ in detections
-                                    ]
-                                    # Draw boxes
-                                    self.annotator.annotate_boxes(frame, detections, labels=labels)
-                                except (TypeError, ValueError) as e:
-                                    pass  # Skip if detection format is unexpected
-
-                            # Process detections for display and tracking
-                            tracked_pos = None
+                            # Process detections
                             processed = []
+                            tracked_pos = None
 
-                            # Iterate through detections (needed for display list and tracking)
                             for det in detections:
                                 _, confidence, class_id, bbox = det
                                 class_id = int(class_id)
-                                label = self.model.labels[class_id] if class_id < len(self.model.labels) else "unknown"
+                                try:
+                                    label = self.model.labels[class_id]
+                                except:
+                                    label = "unknown"
 
-                                # Build processed list for display
                                 processed.append({
                                     "label": label,
                                     "confidence": float(confidence),
                                     "bbox": bbox
                                 })
 
-                                # Track position (only find first matching target)
+                                # Tracking logic
                                 if tracked_pos is None:
                                     should_track = False
                                     if current_mode == YoloMode.TRACK:
@@ -412,65 +374,81 @@ class YoloTracker:
 
                                     if should_track:
                                         x1, y1, x2, y2 = bbox
-                                        # Use pre-calculated frame dimensions
                                         cx = ((x1 + x2) / 2) / frame_w
                                         cy = ((y1 + y2) / 2) / frame_h
                                         tracked_pos = (cx, cy)
 
-                            # Keep frame as RGB (don't convert - main loop expects RGB for pygame)
-                            frame_rgb = frame_image
-
-                            # Pre-calculate cached values BEFORE locking
-                            # This avoids doing expensive operations inside the lock
+                            # Update State
                             if tracked_pos is not None:
                                 cached_pos = ((tracked_pos[0] - 0.5) * 2, (tracked_pos[1] - 0.5) * 2)
                             else:
                                 cached_pos = (0, 0)
 
-                            # Pre-sort labels (do expensive sort outside lock)
                             sorted_labels = [d["label"] for d in sorted(processed, key=lambda x: x["confidence"], reverse=True)[:3]]
 
-                            # Update shared state (quick operation)
                             with self._lock:
                                 self._detections = processed
-                                self._latest_frame = frame_rgb
+                                self._latest_frame = frame_image
                                 self._tracked_position = tracked_pos
-
-                            # Update cached values atomically (no lock needed for simple assignments)
+                            
                             self._cached_position = cached_pos
                             self._cached_labels = sorted_labels
 
-                            # Calculate FPS
+                            # --- FPS Calculation (ปรับปรุง) ---
                             self._frame_count += 1
                             now = time.time()
                             if now - self._last_time >= 1.0:
                                 self._fps = self._frame_count
+                                # ถ้า FPS สูงผิดปกติ แสดงว่า Loop หมุนฟรี
+                                if self._fps > 100: 
+                                    print(f"YOLO: [WARNING] FPS anomaly ({self._fps}). Possible stream sync issue.")
+                                else:
+                                    # Log detection results to console (once per second)
+                                    if len(processed) > 0:
+                                        top_detections = sorted(processed, key=lambda x: x["confidence"], reverse=True)[:3]
+                                        detection_str = ", ".join([
+                                            f"{d['label']} ({d['confidence']:.2f})" 
+                                            for d in top_detections
+                                        ])
+                                        print(f"[YOLO] Detected: {detection_str} | FPS: {self._fps}")
+                                    else:
+                                        print(f"[YOLO] No detections | FPS: {self._fps}")
+                                
                                 self._frame_count = 0
                                 self._last_time = now
-                        
-                        # Successfully acquired and processed, break retry loop
-                        break
+                            
+                            # --- End Processing ---
 
-                except Exception as acquire_error:
-                    error_str = str(acquire_error)
-                    if "Configured state" in error_str or "Device or resource busy" in error_str:
-                        if attempt < max_acquisition_retries - 1:
-                            print(f"YOLO: Acquisition failed (attempt {attempt + 1}/{max_acquisition_retries}): {acquire_error}")
-                            print(f"   - Waiting {acquisition_delay}s before retry...")
-                            time.sleep(acquisition_delay)
-                            acquisition_delay *= 1.5  # Exponential backoff
-                            continue
-                        else:
-                            print(f"YOLO: All acquisition attempts failed: {acquire_error}")
-                            raise acquire_error
+                except Exception as stream_error:
+                    # นี่คือจุดที่จะจับ Error "Camera frontend has timed out"
+                    error_str = str(stream_error)
+                    if "timeout" in error_str.lower() or "timed out" in error_str.lower():
+                        print(f"YOLO: Stream timeout detected! Error: {stream_error}")
                     else:
-                        # Different error, don't retry
-                        raise acquire_error
-                        
-        except Exception as e:
-            print(f"YOLO detection error: {e}")
-        finally:
-            self._running = False
+                        print(f"YOLO: Stream crashed! Error: {stream_error}")
+                    print("YOLO: Initiating Auto-Recovery...")
+                    raise stream_error  # ส่งต่อไปให้วงนอกจัดการ Cleanup
+
+            except Exception as e:
+                # Catch-all สำหรับ Error ทั้งหมด (Acquire fail, Stream crash)
+                if not self._running:
+                    break
+                    
+                print(f"YOLO: Critical Error detected: {e}")
+                print("YOLO: Performing Hard Reset...")
+                
+                # 1. Cleanup ของเก่า
+                self._cleanup_device()
+                self.device = None
+                
+                # 2. รอให้ Hardware เย็นลง/Reset
+                print("YOLO: Cooling down (3s)...")
+                time.sleep(3.0)
+                
+                # Loop จะวนกลับไปบรรทัดแรก เพื่อ _init_camera ใหม่เอง
+                continue
+
+        print("YOLO: Thread exiting...")
 
     @property
     def detections(self):
@@ -773,7 +751,7 @@ class DummyYoloTracker:
         pass
 
 
-def create_yolo_tracker(confidence_threshold=0.5, frame_rate=30):
+def create_yolo_tracker(confidence_threshold=0.5, frame_rate=10):
     """Factory function to create appropriate YOLO tracker"""
     if YOLO_AVAILABLE:
         return YoloTracker(confidence_threshold, frame_rate)
