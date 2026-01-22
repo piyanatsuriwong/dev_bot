@@ -23,7 +23,8 @@
       "mcp__context7__query-docs",
       "WebFetch(domain:docs.ultralytics.com)",
       "WebFetch(domain:github.com)",
-      "Bash(claude mcp add:*)"
+      "Bash(claude mcp add:*)",
+      "Bash(ls:*)"
     ]
   }
 }

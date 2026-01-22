@@ -150,60 +150,25 @@ class YoloTracker:
 
     def _init_camera(self):
         try:
+            import config
+            cam_idx = getattr(config, 'CAMERA_IMX500_NUM', 1)
+
             print(f"Loading {model_name} model...")
             self.model = YOLO_MODEL_CLASS()
             print(f"Model loaded! Classes: {len(self.model.labels)}")
 
-            print("Initializing AI Camera and Deploying Model...")
-            time.sleep(1.0)
+            print(f"Initializing AI Camera (IMX500) on index {cam_idx}...")
+            time.sleep(0.5)
 
-            device_initialized = False
-            last_error = None
+            try:
+                self.device = AiCamera(frame_rate=self.frame_rate, num=cam_idx)
+                print(f"Deploying model to IMX500...")
+                self.device.deploy(self.model)
+                self.annotator = Annotator()
+                print(f"[SUCCESS] IMX500 initialized on camera {cam_idx}")
 
-            for cam_idx in [1, 0, 2, 3]:
-                print(f"   - Testing Camera Index {cam_idx}...")
-                temp_device = None
-                try:
-                    temp_device = AiCamera(frame_rate=self.frame_rate, num=cam_idx)
-                    print(f"     [Index {cam_idx}] Attempting deploy...")
-                    temp_device.deploy(self.model)
-
-                    self.device = temp_device
-                    self.annotator = Annotator()
-                    device_initialized = True
-                    print(f"   [SUCCESS] Camera Index {cam_idx} is IMX500!")
-                    break
-
-                except KeyError as e:
-                    print(f"     [Index {cam_idx}] KeyError: {e}")
-                    last_error = e
-                    if temp_device:
-                        try:
-                            if hasattr(temp_device, 'close'):
-                                temp_device.close()
-                            elif hasattr(temp_device, '__exit__'):
-                                temp_device.__exit__(None, None, None)
-                        except:
-                            pass
-                    gc.collect()
-                    time.sleep(1.0)
-
-                except Exception as e:
-                    print(f"     [Index {cam_idx}] Failed: {e}")
-                    last_error = e
-                    if temp_device:
-                        try:
-                            if hasattr(temp_device, 'close'):
-                                temp_device.close()
-                            elif hasattr(temp_device, '__exit__'):
-                                temp_device.__exit__(None, None, None)
-                        except:
-                            pass
-                    gc.collect()
-                    time.sleep(0.5)
-
-            if not device_initialized:
-                print(f"   [ERROR] Could not find IMX500. Last error: {last_error}")
+            except Exception as e:
+                print(f"[ERROR] Failed to initialize IMX500: {e}")
                 self.device = None
                 return
 

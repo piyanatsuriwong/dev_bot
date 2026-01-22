@@ -199,8 +199,9 @@ The system MUST support 3 distinct operating modes:
   - OpenCV skin detection (fallback)
 - **Output:**
   - Robot eyes track hand position
-  - Pan-Tilt servo follows hand
-  - Display hand tracking info on HDMI
+  - Pan-Tilt servo actively tracks and centers the hand in the frame
+  - Display hand tracking info on HDMI (visible MediaPipe landmarks)
+  - Eye mood changes based on number of extended fingers
 - **Performance:** < 50ms latency from hand movement to eye response
 
 #### Mode 2: AI (Object Detection)
@@ -248,7 +249,7 @@ The system MUST support 3 distinct operating modes:
 - **Refresh Rate:** 30 FPS
 - **Content:**
   - Camera feed with overlays
-  - Hand landmarks (HAND mode)
+  - MediaPipe Hand Landmarks overlay (skeleton/joints) (HAND mode)
   - Detection bounding boxes (AI mode)
   - FPS counter
   - Mode indicator
@@ -268,6 +269,17 @@ The system MUST support 3 distinct operating modes:
 - "ตรวจจับ" / "detect" → AI DETECT mode
 - "มีความสุข" / "happy" → Change mood to HAPPY
 - "โกรธ" / "angry" → Change mood to ANGRY
+
+### 3.4 Hand Gesture Controls (Finger Count)
+
+| Fingers | Mood | description |
+|---------|------|-------------|
+| 0 (Fist) | ANGRY | Aggressive/Closed |
+| 1 | CURIOUS | Looking/Pointing |
+| 2 | HAPPY | Peace sign/Happy |
+| 3 | TIRED | Low energy |
+| 4 | SCARY | Intimidating |
+| 5 (Open) | DEFAULT | Normal/Neutral |
 
 ### 3.4 Performance Requirements
 
@@ -301,9 +313,8 @@ The system MUST support 3 distinct operating modes:
        │   └─→ roboeyes.py (Eye animation engine)
        │
        ├─→ Camera Layer
-       │   ├─→ HandTrackerMediaPipe (IMX708)
-       │   ├─→ HandTrackerOpenCV (IMX708 fallback)
-       │   └─→ yolo_tracker.py (IMX500 + YOLO)
+       │   ├─→ hand_tracker.py (IMX708 Hand Tracking)
+       │   └─→ yolo_tracker.py (IMX500 YOLO Detection)
        │
        ├─→ Servo Layer
        │   └─→ servo_controller.py (PCA9685)
@@ -318,7 +329,7 @@ The system MUST support 3 distinct operating modes:
 ```
 IMX708 (CSI-2)
     ↓
-Picamera2 (1280x720 RGB888)
+hand_tracker.py (Picamera2)
     ↓
 MediaPipe Hand Detection
     ↓
@@ -326,7 +337,7 @@ Normalize Coordinates (-1 to 1)
     ↓
     ├─→ RoboEyes (Eye position)
     ├─→ ServoController (Pan-Tilt)
-    └─→ HDMI Display (Preview)
+    └─→ HDMI Display (Preview with Landmarks)
 ```
 
 #### AI Mode Flow
@@ -351,6 +362,7 @@ Track Primary Object
 
 #### IMX708 (HAND Mode)
 ```python
+# hand_tracker.py
 from picamera2 import Picamera2
 
 picam = Picamera2(camera_num=0)
@@ -447,6 +459,7 @@ hand-eye-tracker/
 ├── gc9a01a_display.py        # GC9A01A SPI display
 │
 ├── # Camera & Tracking
+├── hand_tracker.py           # IMX708 Hand Tracking
 ├── yolo_tracker.py           # IMX500 YOLO detection
 │
 ├── # Hardware Control

@@ -7,7 +7,7 @@ Robot eye tracking system for Raspberry Pi 5 with ST7735S/GC9A01A display.
 - **Hand Tracking Mode**: Track hands using MediaPipe or OpenCV
 - **AI Mode**: Object detection using IMX500 AI Camera with YOLO
 - **Demo Mode**: Animated eyes without camera
-- **Pan-Tilt Servo Control**: Track objects with camera movement
+- **Pan-Tilt Servo Control**: Track objects or hands with camera movement
 - **Multiple Display Support**: ST7735S (160x128) or GC9A01A (240x240)
 
 ## Hardware Requirements
@@ -105,10 +105,14 @@ python3 main_roboeyes.py --mode demo
 
 ## Gesture Controls (Hand Mode)
 
-| Gesture | Eye Mood |
+| Fingers | Eye Mood |
 |---------|----------|
-| Fist | ANGRY |
-| Open Hand | HAPPY |
+| 0 (Fist) | ANGRY |
+| 1 | CURIOUS |
+| 2 (Peace) | HAPPY |
+| 3 | TIRED |
+| 4 | SCARY |
+| 5 (Open) | DEFAULT |
 
 ## Configuration
 
