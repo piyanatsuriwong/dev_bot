@@ -7,7 +7,7 @@ Raspberry Pi 5 with ST7735S / GC9A01A Display
 Architecture:
 - Main Thread: HDMI Display + Keyboard Events
 - Thread 1: Eye Animation (ST7735S SPI Display)
-- Thread 2: YOLO Detection (IMX500 AI Camera)
+- Thread 2: Hand Tracking (Regular Camera with MediaPipe/OpenCV)
 """
 
 import pygame
@@ -28,13 +28,21 @@ import config
 from roboeyes import *
 from servo_controller import ServoController
 
+# Try to import MediaPipe
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
+except ImportError:
+    MEDIAPIPE_AVAILABLE = False
+    print("Warning: MediaPipe not available, will use OpenCV fallback")
+
 # Try to import Picamera2
 try:
     from picamera2 import Picamera2
-    PICAM2_AVAILABLE = True
+    PICAMERA2_AVAILABLE = True
 except ImportError:
-    PICAM2_AVAILABLE = False
-    print("Warning: Picamera2 not available")
+    PICAMERA2_AVAILABLE = False
+    print("Warning: Picamera2 not available, will use OpenCV")
 
 # Import display driver based on config
 if config.DISPLAY_MODE == "gc9a01a":
@@ -43,13 +51,6 @@ elif config.DISPLAY_MODE == "st7735s":
     from st7735_display import create_display, RPI_AVAILABLE
 else:
     RPI_AVAILABLE = False
-
-try:
-    from yolo_tracker import create_yolo_tracker, YOLO_AVAILABLE, YoloMode
-except ImportError:
-    YOLO_AVAILABLE = False
-    YoloMode = None
-    print("YOLO Tracker: Not available")
 
 
 class SharedState:
@@ -61,10 +62,10 @@ class SharedState:
         self._target_y = 0.0
         self._has_target = False
         self._mood = DEFAULT
-        self._detected_labels = []
-        self._yolo_fps = 0
-        self._yolo_frame = None
+        self._tracking_fps = 0
+        self._camera_frame = None
         self._running = True
+        self._tracking_info = ""
 
     @property
     def running(self):
@@ -96,20 +97,20 @@ class SharedState:
         with self._lock:
             self._mood = value
 
-    def set_detections(self, labels, fps, frame=None):
+    def set_tracking_data(self, fps, frame=None, info=""):
         with self._lock:
-            self._detected_labels = labels
-            self._yolo_fps = fps
+            self._tracking_fps = fps
+            self._tracking_info = info
             if frame is not None:
-                self._yolo_frame = frame
+                self._camera_frame = frame
 
-    def get_detections(self):
+    def get_tracking_data(self):
         with self._lock:
-            return self._detected_labels.copy(), self._yolo_fps
+            return self._tracking_fps, self._tracking_info
 
-    def get_yolo_frame(self):
+    def get_camera_frame(self):
         with self._lock:
-            return self._yolo_frame
+            return self._camera_frame
 
 
 class EyeAnimationThread(threading.Thread):
@@ -223,93 +224,205 @@ class EyeAnimationThread(threading.Thread):
         print("[Thread 1] Eye Animation: Stopped")
 
 
-class YoloDetectionThread(threading.Thread):
+class HandTrackingThread(threading.Thread):
     """
-    Thread 2: YOLO Object Detection on IMX500
+    Thread 2: Hand Tracking with Camera 0 (IMX708) only
     """
 
-    def __init__(self, shared_state, confidence=0.5):
-        super().__init__(name="YoloDetectionThread", daemon=True)
+    def __init__(self, shared_state, use_mediapipe=True):
+        super().__init__(name="HandTrackingThread", daemon=True)
         self.shared = shared_state
-        self.confidence = confidence
-        self.yolo_tracker = None
-        self.track_target = "person"
+        self.camera_index = 0  # LOCKED to Camera 0 (IMX708)
+        self.use_mediapipe = use_mediapipe and MEDIAPIPE_AVAILABLE
+        self.use_picamera2 = PICAMERA2_AVAILABLE
+        self.cap = None
+        self.picam2 = None
+        self.mp_hands = None
+        self.hands = None
 
     def run(self):
-        print("[Thread 2] YOLO Detection: Starting...")
+        print("[Thread 2] Hand Tracking: Starting...")
 
-        if not YOLO_AVAILABLE:
-            print("[Thread 2] YOLO not available, thread will idle")
-            while self.shared.running:
-                time.sleep(1)
+        # Initialize camera
+        if not self._init_camera():
             return
 
-        # Initialize YOLO Tracker
-        self.yolo_tracker = create_yolo_tracker(
-            confidence_threshold=self.confidence,
-            frame_rate=10
-        )
+        # Initialize MediaPipe if available
+        if self.use_mediapipe:
+            self.mp_hands = mp.solutions.hands
+            self.hands = self.mp_hands.Hands(
+                static_image_mode=False,
+                max_num_hands=1,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            print("[Thread 2] Using MediaPipe hand tracking")
+        else:
+            print("[Thread 2] Using OpenCV hand tracking")
 
-        if not self.yolo_tracker:
-            print("[Thread 2] Failed to create YOLO tracker")
-            return
+        print("[Thread 2] Hand Tracking: Running...")
 
-        # Set initial mode
-        if YoloMode:
-            self.yolo_tracker.set_mode(YoloMode.TRACK)
-        self.yolo_tracker.set_track_target(self.track_target)
-
-        # Start YOLO detection
-        if not self.yolo_tracker.start():
-            print("[Thread 2] Failed to start YOLO tracker")
-            return
-
-        print("[Thread 2] YOLO Detection: Running...")
-
+        frame_count = 0
+        last_fps_time = time.time()
         last_log_time = time.time()
+        fps = 0
 
         while self.shared.running:
-            # Get detection results
-            tx, ty = self.yolo_tracker.get_normalized_position()
+            # Read frame from camera
+            if self.use_picamera2:
+                frame = self.picam2.capture_array()
+                # Picamera2 returns RGB, convert to BGR for OpenCV/MediaPipe
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            else:
+                ret, frame = self.cap.read()
+                if not ret:
+                    print("[Thread 2] Failed to read frame")
+                    time.sleep(0.1)
+                    continue
 
-            if tx != 0 or ty != 0:
+            frame = cv2.flip(frame, 1)
+
+            # Track hand
+            if self.use_mediapipe:
+                tx, ty, has_hand = self._track_mediapipe(frame)
+            else:
+                tx, ty, has_hand = self._track_opencv(frame)
+
+            # Update shared state
+            if has_hand:
                 self.shared.set_target(tx, ty, has_target=True)
             else:
                 self.shared.set_target(0, 0, has_target=False)
 
-            # Update detection labels and frame
-            labels = self.yolo_tracker.get_detection_text(max_items=3)
-            fps = self.yolo_tracker.fps
-            frame = self.yolo_tracker.latest_frame
-            self.shared.set_detections(labels, fps, frame)
+            # Calculate FPS
+            frame_count += 1
+            now = time.time()
+            if now - last_fps_time >= 1.0:
+                fps = frame_count / (now - last_fps_time)
+                frame_count = 0
+                last_fps_time = now
+
+            # Update tracking data
+            info = "Hand detected" if has_hand else "No hand"
+            self.shared.set_tracking_data(fps, frame, info)
 
             # Log every 5 seconds
-            now = time.time()
             if now - last_log_time >= 5.0:
-                if labels:
-                    print(f"[Thread 2] YOLO: {', '.join(labels)} | FPS: {fps}")
-                else:
-                    print(f"[Thread 2] YOLO: No detections | FPS: {fps}")
+                print(f"[Thread 2] IMX708: {info} | FPS: {fps:.1f}")
                 last_log_time = now
 
-            time.sleep(0.01)
-
         # Cleanup
-        print("[Thread 2] YOLO Detection: Stopping...")
-        if self.yolo_tracker:
-            self.yolo_tracker.cleanup()
-        print("[Thread 2] YOLO Detection: Stopped")
+        print("[Thread 2] Hand Tracking: Stopping...")
+        if self.hands:
+            self.hands.close()
+        if self.use_picamera2 and self.picam2:
+            self.picam2.stop()
+            self.picam2.close()
+        if self.cap:
+            self.cap.release()
+        print("[Thread 2] Hand Tracking: Stopped")
 
-    def set_mode(self, mode):
-        """Set YOLO mode from main thread"""
-        if self.yolo_tracker and YoloMode:
-            self.yolo_tracker.set_mode(mode)
-            print(f"[Thread 2] Mode changed to: {mode.value}")
+    def _init_camera(self):
+        """Initialize Camera 0 (IMX708) only"""
+        if self.use_picamera2:
+            try:
+                self.picam2 = Picamera2(0)
+                config = self.picam2.create_preview_configuration(
+                    main={"size": (640, 480), "format": "RGB888"}
+                )
+                self.picam2.configure(config)
+                self.picam2.start()
+                print("[Thread 2] Camera 0 (IMX708) opened with Picamera2")
+                return True
+            except Exception as e:
+                print(f"[Thread 2] Picamera2 failed: {e}")
+                self.use_picamera2 = False
+                # Fall through to OpenCV
+        
+        # Fallback to OpenCV
+        self.cap = cv2.VideoCapture(0)
+        if not self.cap.isOpened():
+            print("[Thread 2] Failed to open Camera 0 (IMX708)")
+            return False
 
-    def set_track_target(self, target):
-        """Set track target from main thread"""
-        if self.yolo_tracker:
-            self.yolo_tracker.set_track_target(target)
+        # Set camera resolution
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        print("[Thread 2] Camera 0 (IMX708) opened with OpenCV")
+        return True
+
+    def _track_mediapipe(self, frame):
+        """Track hand using MediaPipe"""
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(rgb_frame)
+
+        if results.multi_hand_landmarks:
+            hand_landmarks = results.multi_hand_landmarks[0]
+            # Use index finger tip (landmark 8)
+            index_tip = hand_landmarks.landmark[8]
+            
+            # Convert to normalized coordinates (-1 to 1)
+            # MediaPipe: x=0 (left), x=1 (right)
+            # Our system: x=-1 (left), x=1 (right)
+            tx = (index_tip.x - 0.5) * 2
+            ty = (index_tip.y - 0.5) * 2
+            
+            # Draw landmarks on frame
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame,
+                hand_landmarks,
+                self.mp_hands.HAND_CONNECTIONS
+            )
+            
+            return tx, ty, True
+        
+        return 0, 0, False
+
+    def _track_opencv(self, frame):
+        """Track hand using OpenCV (simple skin detection)"""
+        # Convert to HSV
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # Define skin color range (adjust as needed)
+        lower_skin = np.array([0, 20, 70], dtype=np.uint8)
+        upper_skin = np.array([20, 255, 255], dtype=np.uint8)
+        
+        # Create mask
+        mask = cv2.inRange(hsv, lower_skin, upper_skin)
+        
+        # Morphological operations
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.erode(mask, kernel, iterations=1)
+        mask = cv2.dilate(mask, kernel, iterations=2)
+        
+        # Find contours
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            # Find largest contour
+            max_contour = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(max_contour)
+            
+            if area > 1000:  # Minimum area threshold
+                # Get center of contour
+                M = cv2.moments(max_contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    
+                    # Draw contour and center
+                    cv2.drawContours(frame, [max_contour], -1, (0, 255, 0), 2)
+                    cv2.circle(frame, (cx, cy), 10, (0, 0, 255), -1)
+                    
+                    # Convert to normalized coordinates
+                    h, w = frame.shape[:2]
+                    tx = (cx / w - 0.5) * 2
+                    ty = (cy / h - 0.5) * 2
+                    
+                    return tx, ty, True
+        
+        return 0, 0, False
 
 
 class NumBotApp:
@@ -317,12 +430,12 @@ class NumBotApp:
     Main Application
     - Main thread handles HDMI display and keyboard
     - Thread 1: Eye Animation (SPI)
-    - Thread 2: YOLO Detection
+    - Thread 2: Hand Tracking (Camera 0: IMX708 only)
     """
 
-    def __init__(self, show_hdmi=True, yolo_confidence=0.5):
+    def __init__(self, show_hdmi=True, use_mediapipe=True):
         self.show_hdmi = show_hdmi
-        self.yolo_confidence = yolo_confidence
+        self.use_mediapipe = use_mediapipe
 
         # Shared state
         self.shared = SharedState()
@@ -332,68 +445,26 @@ class NumBotApp:
 
         # Threads
         self.eye_thread = None
-        self.yolo_thread = None
-
-        # Secondary camera (IMX708)
-        self.secondary_cam = None
+        self.tracking_thread = None
 
         # Pygame (HDMI)
         self.screen = None
         self.clock = None
         self.font = None
 
-    def init_secondary_camera(self):
-        """Initialize IMX708 secondary camera"""
-        if not PICAM2_AVAILABLE:
-            print("[Main] Picamera2 not available")
-            return False
-
-        for cam_idx in [0, 1]:
-            try:
-                print(f"[Main] Trying camera index {cam_idx}...")
-                self.secondary_cam = Picamera2(camera_num=cam_idx)
-                cam_config = self.secondary_cam.create_preview_configuration(
-                    main={"size": (640, 480), "format": "RGB888"}
-                )
-                self.secondary_cam.configure(cam_config)
-                self.secondary_cam.start()
-                print(f"[Main] Secondary camera (IMX708) started on index {cam_idx}")
-                return True
-            except Exception as e:
-                print(f"[Main] Camera {cam_idx} failed: {e}")
-                if self.secondary_cam:
-                    try:
-                        self.secondary_cam.close()
-                    except:
-                        pass
-                self.secondary_cam = None
-
-        print("[Main] Could not initialize secondary camera")
-        return False
-
     def run(self):
         print("=" * 50)
-        print("NumBot - Multi-Threaded Robot Eye Tracker")
+        print("NumBot - Robot Eye Tracker with Hand Tracking")
         print("=" * 50)
 
-        # Initialize Pygame (Main Thread)
-        pygame.init()
-
+        # Initialize Pygame only if HDMI display is needed
         if self.show_hdmi:
-            self.screen = pygame.display.set_mode((1280, 480))
-            pygame.display.set_caption("NumBot - Dual Camera View")
-        else:
-            # Minimal display for event handling
-            self.screen = pygame.display.set_mode((320, 240))
-            pygame.display.set_caption("NumBot Control")
-
-        self.clock = pygame.time.Clock()
-        self.font = pygame.font.Font(None, 30)
-        self.small_font = pygame.font.Font(None, 24)
-
-        # Initialize secondary camera
-        if self.show_hdmi:
-            self.init_secondary_camera()
+            pygame.init()
+            self.screen = pygame.display.set_mode((640, 480))
+            pygame.display.set_caption("NumBot - Hand Tracking")
+            self.clock = pygame.time.Clock()
+            self.font = pygame.font.Font(None, 30)
+            self.small_font = pygame.font.Font(None, 24)
 
         # Create and start threads
         print("\nStarting threads...")
@@ -404,36 +475,41 @@ class NumBotApp:
 
         time.sleep(0.5)
 
-        self.yolo_thread = YoloDetectionThread(self.shared, self.yolo_confidence)
-        self.yolo_thread.start()
-        print("  [OK] Thread 2: YOLO Detection (IMX500)")
+        self.tracking_thread = HandTrackingThread(
+            self.shared,
+            use_mediapipe=self.use_mediapipe
+        )
+        self.tracking_thread.start()
+        print("  [OK] Thread 2: Hand Tracking (Camera 0: IMX708)")
 
         print("\nAll threads running!")
         print("\nKeyboard Controls:")
         print("  ESC   - Exit")
         print("  SPACE - Random mood")
-        print("  D     - DETECT mode")
-        print("  T     - TRACK mode")
         print("  1-5   - Set mood (1=Happy, 2=Angry, 3=Tired, 4=Scared, 5=Default)")
         print()
 
         # Main loop (HDMI display + keyboard)
         try:
-            while self.shared.running:
-                # Handle events
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        self.shared.running = False
+            if self.show_hdmi:
+                # HDMI mode with pygame display
+                while self.shared.running:
+                    # Handle events
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            self.shared.running = False
 
-                    if event.type == pygame.KEYDOWN:
-                        self.handle_key(event.key)
+                        if event.type == pygame.KEYDOWN:
+                            self.handle_key(event.key)
 
-                # Draw HDMI view
-                if self.show_hdmi:
+                    # Draw HDMI view
                     self.draw_hdmi_view()
-
-                pygame.display.flip()
-                self.clock.tick(30)
+                    pygame.display.flip()
+                    self.clock.tick(30)
+            else:
+                # Headless mode - just wait for threads
+                while self.shared.running:
+                    time.sleep(0.1)
 
         except KeyboardInterrupt:
             print("\nCtrl+C received")
@@ -452,14 +528,6 @@ class NumBotApp:
             mood_names = {HAPPY: "HAPPY", ANGRY: "ANGRY", TIRED: "TIRED", SCARY: "SCARY", DEFAULT: "DEFAULT"}
             print(f"[Main] Mood: {mood_names.get(new_mood, 'UNKNOWN')}")
 
-        elif key == pygame.K_d:
-            if self.yolo_thread and YoloMode:
-                self.yolo_thread.set_mode(YoloMode.DETECT)
-
-        elif key == pygame.K_t:
-            if self.yolo_thread and YoloMode:
-                self.yolo_thread.set_mode(YoloMode.TRACK)
-
         elif key == pygame.K_1:
             self.shared.mood = HAPPY
             print("[Main] Mood: HAPPY")
@@ -477,64 +545,55 @@ class NumBotApp:
             print("[Main] Mood: DEFAULT")
 
     def draw_hdmi_view(self):
-        """Draw dual camera view on HDMI"""
+        """Draw camera view with hand tracking on HDMI"""
         self.screen.fill((20, 20, 20))
 
-        # Left Panel: Secondary Camera (IMX708)
-        if self.secondary_cam:
+        # Get camera frame from tracking thread
+        camera_frame = self.shared.get_camera_frame()
+        
+        if camera_frame is not None:
             try:
-                frame = self.secondary_cam.capture_array()
-                frame = cv2.resize(frame, (640, 480))
-                # RGB format from Picamera2
-                surf = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
-                self.screen.blit(surf, (0, 0))
-            except Exception as e:
-                self.draw_placeholder(0, f"Camera Error: {e}")
-        else:
-            self.draw_placeholder(0, "No Secondary Camera")
-
-        # Right Panel: YOLO Frame (IMX500)
-        yolo_frame = self.shared.get_yolo_frame()
-        if yolo_frame is not None:
-            try:
-                frame = cv2.resize(yolo_frame, (640, 480))
-                # Convert BGR to RGB if needed
+                frame = cv2.resize(camera_frame, (640, 480))
+                # Convert BGR to RGB
                 if len(frame.shape) == 3 and frame.shape[2] == 3:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 surf = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
-                self.screen.blit(surf, (640, 0))
+                self.screen.blit(surf, (0, 0))
             except Exception as e:
-                self.draw_placeholder(640, f"YOLO Error: {e}")
+                self.draw_placeholder(f"Camera Error: {e}")
         else:
-            self.draw_placeholder(640, "Waiting for YOLO...")
+            self.draw_placeholder("Waiting for camera...")
 
-        # Draw Labels
-        self.screen.blit(self.font.render("IMX708 (Secondary)", True, (0, 255, 0)), (10, 10))
-        self.screen.blit(self.font.render("IMX500 (YOLO)", True, (0, 255, 0)), (650, 10))
+        # Draw title
+        tracking_type = "MediaPipe" if self.use_mediapipe else "OpenCV"
+        title = f"IMX708 Hand Tracking ({tracking_type})"
+        self.screen.blit(self.font.render(title, True, (0, 255, 0)), (10, 10))
 
-        # Draw detection info
-        labels, fps = self.shared.get_detections()
-        if labels:
-            info_text = f"Detected: {', '.join(labels)}"
-            self.screen.blit(self.font.render(info_text, True, (255, 255, 0)), (650, 40))
+        # Draw tracking info
+        fps, info = self.shared.get_tracking_data()
+        info_text = f"{info} | FPS: {fps:.1f}"
+        self.screen.blit(self.font.render(info_text, True, (255, 255, 0)), (10, 40))
 
-        fps_text = f"YOLO FPS: {fps}"
-        self.screen.blit(self.small_font.render(fps_text, True, (200, 200, 200)), (650, 460))
-
-        # Draw mode info
-        if self.yolo_thread and self.yolo_thread.yolo_tracker:
-            mode_text = self.yolo_thread.yolo_tracker.get_mode_text()
-            self.screen.blit(self.font.render(f"Mode: {mode_text}", True, (0, 255, 255)), (10, 460))
+        # Draw mood
+        mood_names = {
+            HAPPY: "HAPPY", 
+            ANGRY: "ANGRY", 
+            TIRED: "TIRED", 
+            SCARY: "SCARY", 
+            DEFAULT: "DEFAULT"
+        }
+        mood_text = f"Mood: {mood_names.get(self.shared.mood, 'UNKNOWN')}"
+        self.screen.blit(self.font.render(mood_text, True, (0, 255, 255)), (10, 440))
 
         # Draw controls hint
-        hint = "Keys: ESC=Exit  SPACE=Mood  D=Detect  T=Track  1-5=Moods"
-        self.screen.blit(self.small_font.render(hint, True, (150, 150, 150)), (300, 460))
+        hint = "Keys: ESC=Exit  SPACE=Random Mood  1-5=Set Mood"
+        self.screen.blit(self.small_font.render(hint, True, (150, 150, 150)), (150, 460))
 
-    def draw_placeholder(self, x_offset, text):
+    def draw_placeholder(self, text):
         """Draw placeholder for missing camera"""
-        pygame.draw.rect(self.screen, (30, 30, 30), (x_offset, 0, 640, 480))
+        pygame.draw.rect(self.screen, (30, 30, 30), (0, 0, 640, 480))
         text_surf = self.font.render(text, True, (100, 100, 100))
-        text_rect = text_surf.get_rect(center=(x_offset + 320, 240))
+        text_rect = text_surf.get_rect(center=(320, 240))
         self.screen.blit(text_surf, text_rect)
 
     def cleanup(self):
@@ -546,36 +605,34 @@ class NumBotApp:
         # Wait for threads
         if self.eye_thread and self.eye_thread.is_alive():
             self.eye_thread.join(timeout=3)
-        if self.yolo_thread and self.yolo_thread.is_alive():
-            self.yolo_thread.join(timeout=3)
-
-        # Cleanup secondary camera
-        if self.secondary_cam:
-            try:
-                self.secondary_cam.stop()
-                self.secondary_cam.close()
-                print("[Main] Secondary camera closed")
-            except:
-                pass
+        if self.tracking_thread and self.tracking_thread.is_alive():
+            self.tracking_thread.join(timeout=3)
 
         # Cleanup servo
         if self.servo:
             self.servo.cleanup()
 
-        pygame.quit()
+        # Cleanup pygame if initialized
+        if self.show_hdmi:
+            pygame.quit()
+        
         print("NumBot stopped.")
 
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="NumBot - Multi-Threaded Robot Eye Tracker")
+    parser = argparse.ArgumentParser(description="NumBot - Robot Eye Tracker (Camera 0: IMX708 only)")
     parser.add_argument('--no-hdmi', action='store_true', help='Disable HDMI camera view')
-    parser.add_argument('--confidence', type=float, default=0.5, help='YOLO confidence threshold')
+    parser.add_argument('--no-mediapipe', action='store_true', help='Use OpenCV instead of MediaPipe')
     args = parser.parse_args()
+
+    print("=" * 60)
+    print("NumBot - Locked to Camera 0 (IMX708)")
+    print("=" * 60)
 
     app = NumBotApp(
         show_hdmi=not args.no_hdmi,
-        yolo_confidence=args.confidence
+        use_mediapipe=not args.no_mediapipe
     )
     app.run()
 

@@ -20,23 +20,23 @@ ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47
 ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "command_here"
 
 # Copy ไฟล์ไป Pi (scp)
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" "D:/mobile/pi5/hand-eye-tracker/filename.py" pi@192.168.1.47:/home/pi/hand-eye-tracker/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" "D:/mobile/pi5/numbot/filename.py" pi@192.168.1.47:/home/pi/numbot/
 
 # Copy หลายไฟล์
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/hand-eye-tracker/*.py pi@192.168.1.47:/home/pi/hand-eye-tracker/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/numbot/*.py pi@192.168.1.47:/home/pi/numbot/
 ```
 
 ## 2. Fresh Install (หลัง Reinstall OS)
 
 ```bash
 # สร้างโฟลเดอร์โปรเจค
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "mkdir -p /home/pi/hand-eye-tracker/assets/eyes /home/pi/hand-eye-tracker/assets/data /home/pi/hand-eye-tracker/assets/sounds"
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "mkdir -p /home/pi/numbot/assets/eyes /home/pi/numbot/assets/data /home/pi/numbot/assets/sounds"
 
 # สร้าง Virtual Environment
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/hand-eye-tracker && python3 -m venv env"
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/numbot && python3 -m venv env"
 
 # ติดตั้ง Dependencies ทั้งหมด
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/hand-eye-tracker && source env/bin/activate && pip install --upgrade pip && pip install mediapipe opencv-python pygame SpeechRecognition gTTS numpy pillow spidev lgpio"
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/numbot && source env/bin/activate && pip install --upgrade pip && pip install mediapipe opencv-python pygame SpeechRecognition gTTS numpy pillow spidev lgpio"
 
 # เปิด SPI
 ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "sudo raspi-config nonint do_spi 0"
@@ -49,36 +49,36 @@ ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "sudo apt-get upda
 
 ```bash
 # Copy Python files
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/hand-eye-tracker/*.py pi@192.168.1.47:/home/pi/hand-eye-tracker/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/numbot/*.py pi@192.168.1.47:/home/pi/numbot/
 
 # Copy assets
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/hand-eye-tracker/assets/eyes/*.png pi@192.168.1.47:/home/pi/hand-eye-tracker/assets/eyes/
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/hand-eye-tracker/assets/data/*.json pi@192.168.1.47:/home/pi/hand-eye-tracker/assets/data/
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/hand-eye-tracker/assets/sounds/*.wav pi@192.168.1.47:/home/pi/hand-eye-tracker/assets/sounds/
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/hand-eye-tracker/assets/solver.png pi@192.168.1.47:/home/pi/hand-eye-tracker/assets/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/numbot/assets/eyes/*.png pi@192.168.1.47:/home/pi/numbot/assets/eyes/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/numbot/assets/data/*.json pi@192.168.1.47:/home/pi/numbot/assets/data/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/numbot/assets/sounds/*.wav pi@192.168.1.47:/home/pi/numbot/assets/sounds/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/numbot/assets/solver.png pi@192.168.1.47:/home/pi/numbot/assets/
 ```
 
 ## 4. Run โปรแกรม
 
 ```bash
 # Run main_roboeyes.py (จาก Windows)
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/hand-eye-tracker && source env/bin/activate && python3 main_roboeyes.py"
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/numbot && source env/bin/activate && python3 main_roboeyes.py"
 
 # Run ใน Demo mode (ไม่ต้องกล้อง)
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/hand-eye-tracker && source env/bin/activate && python3 main_roboeyes.py --demo"
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/numbot && source env/bin/activate && python3 main_roboeyes.py --demo"
 
 # Run test hand landmarks
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/hand-eye-tracker && source env/bin/activate && python3 test_hand_landmarks.py"
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/numbot && source env/bin/activate && python3 test_hand_landmarks.py"
 
 # Run test microphone
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/hand-eye-tracker && source env/bin/activate && python3 test_mic.py"
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/numbot && source env/bin/activate && python3 test_mic.py"
 ```
 
 ## 5. Run โปรแกรม (SSH Interactive บน Pi)
 
 ```bash
 # หลังจาก SSH เข้าไปแล้ว
-cd /home/pi/hand-eye-tracker
+cd /home/pi/numbot
 source env/bin/activate
 
 # Run programs
@@ -113,16 +113,16 @@ ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "pkill -9 -f main_
 # ดู process ที่รันอยู่
 ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "ps aux | grep python"
 
-# Kill ทุกอย่างที่เกี่ยวกับ hand-eye-tracker
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "pkill -9 -f hand-eye-tracker"
+# Kill ทุกอย่างที่เกี่ยวกับ numbot
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "pkill -9 -f numbot"
 ```
 
 ---
 
 ## Project Paths
 
-- **Local (Windows):** `D:\mobile\pi5\hand-eye-tracker\`
-- **Remote (Pi):** `/home/pi/hand-eye-tracker/`
+- **Local (Windows):** `D:\mobile\pi5\numbot\`
+- **Remote (Pi):** `/home/pi/numbot/`
 
 ---
 
@@ -135,7 +135,7 @@ ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "pkill -9 -f hand-
 ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47
 
 # Run on Pi
-cd /home/pi/hand-eye-tracker
+cd /home/pi/numbot
 python3 main_roboeyes.py
 ```
 
@@ -383,7 +383,7 @@ rpicam-hello --list-cameras
 
 ### Install Dependencies
 ```bash
-cd /home/pi/hand-eye-tracker
+cd /home/pi/numbot
 source env/bin/activate
 pip install git+https://github.com/SonySemiconductorSolutions/aitrios-rpi-application-module-library.git
 ```
@@ -391,7 +391,7 @@ pip install git+https://github.com/SonySemiconductorSolutions/aitrios-rpi-applic
 ### Run YOLO (HTTP Streaming)
 ```bash
 # Start YOLO
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/hand-eye-tracker && source env/bin/activate && nohup python3 -u test_yolo_imx500.py > /tmp/yolo.log 2>&1 &"
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/numbot && source env/bin/activate && nohup python3 -u test_yolo_imx500.py > /tmp/yolo.log 2>&1 &"
 
 # View in browser
 http://192.168.1.47:8080
@@ -484,7 +484,7 @@ pkill -f main_roboeyes
 
 ```bash
 # รัน AI Camera mode
-ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/hand-eye-tracker && source env/bin/activate && python3 main_roboeyes.py --ai-camera"
+ssh -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" pi@192.168.1.47 "cd /home/pi/numbot && source env/bin/activate && python3 main_roboeyes.py --ai-camera"
 ```
 
 ## Modes
@@ -608,7 +608,7 @@ Please check that your camera sensor connector is attached securely.
 ### YOLO Not Available
 ```bash
 # ติดตั้ง modlib
-cd /home/pi/hand-eye-tracker
+cd /home/pi/numbot
 source env/bin/activate
 pip install git+https://github.com/SonySemiconductorSolutions/aitrios-rpi-application-module-library.git
 ```

@@ -7,7 +7,7 @@ This project is a dual-component robotics system running on a Raspberry Pi 5. It
 
 The system consists of two main independent components:
 
-1.  **Hand-Eye Tracker (`hand-eye-tracker/`)**:
+1.  **Hand-Eye Tracker (`numbot/`)**:
     *   **Function:** Visualizes animated "eyes" on a GC9A01A round LCD.
     *   **Input:** Webcam or AI Camera (IMX500) for tracking hands, faces, or objects. Microphone for voice commands.
     *   **Logic:** Uses MediaPipe or OpenCV for computer vision to update the eye gaze and "mood".
@@ -23,7 +23,7 @@ The system consists of two main independent components:
 
 ## Component 1: Hand-Eye Tracker
 
-Located in `D:\mobile\pi5\hand-eye-tracker\` (Local) or `/home/pi/hand-eye-tracker/` (Remote).
+Located in `D:\mobile\pi5\numbot\` (Local) or `/home/pi/numbot/` (Remote).
 
 ### Key Files
 *   `main_roboeyes.py`: **Main Entry Point.** Runs the eye animation loop and tracking logic.
@@ -35,7 +35,7 @@ Located in `D:\mobile\pi5\hand-eye-tracker\` (Local) or `/home/pi/hand-eye-track
 ### Running the Tracker
 **Standard Mode (Webcam + Hand Tracking):**
 ```bash
-cd /home/pi/hand-eye-tracker
+cd /home/pi/numbot
 source env/bin/activate
 python3 main_roboeyes.py
 ```
@@ -84,7 +84,7 @@ The server accepts text-based commands over TCP (Port 5000).
 ### Common Commands
 **Deploy Code (Windows -> Pi):**
 ```powershell
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/hand-eye-tracker/*.py pi@192.168.1.47:/home/pi/hand-eye-tracker/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/numbot/*.py pi@192.168.1.47:/home/pi/numbot/
 ```
 
 **Install Dependencies (Pi):**
