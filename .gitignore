@@ -9,3 +9,4 @@ nul
 %USERPROFILE%.sshid_ed25519_pi5.pub
 *.ssh*
 id_ed25519*
+/backup/*

@@ -59,8 +59,13 @@ class HandTracker:
         self.has_hand = False
         self.finger_count = 0
         self.landmarks = None
+        self.landmarks_list = []    # List of (id, cx, cy) for drawing
         self.latest_frame = None
         self.latest_frame_rgb = None
+        
+        # Smoothing with moving average (reduce jitter)
+        self.position_history = []  # Store last N positions
+        self.history_size = 5       # Average over 5 frames
 
         # FPS tracking
         self.frame_count = 0
@@ -70,6 +75,24 @@ class HandTracker:
         # Initialize components
         self._init_mediapipe()
 
+    def _get_landmarks_list(self, hand_landmarks, frame_shape):
+        """
+        Convert hand landmarks to list of (id, cx, cy) coordinates
+        
+        Args:
+            hand_landmarks: MediaPipe hand landmarks
+            frame_shape: Frame shape (height, width, channels)
+            
+        Returns:
+            List of (id, cx, cy) tuples
+        """
+        h, w, _ = frame_shape
+        landmarks = []
+        for id, lm in enumerate(hand_landmarks.landmark):
+            cx, cy = int(lm.x * w), int(lm.y * h)
+            landmarks.append((id, cx, cy))
+        return landmarks
+    
     def _init_mediapipe(self):
         """Initialize MediaPipe Hands"""
         if not MEDIAPIPE_AVAILABLE:
@@ -99,15 +122,20 @@ class HandTracker:
             print(f"HandTracker: Opening camera {self.camera_num}...")
             self.camera = Picamera2(camera_num=self.camera_num)
 
-            # Configure camera
+            # Configure camera for maximum FOV (Field of View)
+            # 1920x1080 automatically uses full sensor FOV (no crop)
             cam_config = self.camera.create_preview_configuration(
-                main={"size": (self.width, self.height), "format": "RGB888"}
+                main={
+                    "size": (self.width, self.height), 
+                    "format": "RGB888"
+                }
             )
             self.camera.configure(cam_config)
             self.camera.start()
 
             self.running = True
             print(f"HandTracker: Camera started ({self.width}x{self.height} @ {self.fps}fps)")
+            print(f"HandTracker: Full sensor FOV - 75° diagonal, 66° horizontal")
             return True
 
         except Exception as e:
@@ -137,20 +165,31 @@ class HandTracker:
                     hand_landmarks = results.multi_hand_landmarks[0]
                     self.landmarks = hand_landmarks
                     self.has_hand = True
+                    
+                    # Get landmarks list for drawing
+                    self.landmarks_list = self._get_landmarks_list(hand_landmarks, frame.shape)
 
-                    # Calculate palm center (average of wrist and middle finger base)
-                    wrist = hand_landmarks.landmark[self.mp_hands.HandLandmark.WRIST]
-                    middle_mcp = hand_landmarks.landmark[self.mp_hands.HandLandmark.MIDDLE_FINGER_MCP]
-
-                    palm_x = (wrist.x + middle_mcp.x) / 2
-                    palm_y = (wrist.y + middle_mcp.y) / 2
+                    # Track INDEX FINGER TIP (landmark #8) instead of palm
+                    # This is more accurate and responsive for tracking
+                    index_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
 
                     # Convert to normalized coordinates (-1 to 1)
-                    # Note: X is inverted (mirror effect)
-                    self.hand_position = (
-                        (palm_x * 2 - 1),  # 0-1 -> -1 to 1
-                        (palm_y * 2 - 1)   # 0-1 -> -1 to 1
-                    )
+                    # INVERT X for mirror effect (camera view is mirrored)
+                    raw_x = -(index_tip.x * 2 - 1)  # Inverted: 0→1, 1→-1 (mirror X)
+                    raw_y = (index_tip.y * 2 - 1)   # Normal Y: 0→-1, 1→1 (top to bottom)
+                    
+                    # Add to history for moving average smoothing
+                    self.position_history.append((raw_x, raw_y))
+                    if len(self.position_history) > self.history_size:
+                        self.position_history.pop(0)
+                    
+                    # Calculate smoothed position (moving average)
+                    if len(self.position_history) > 0:
+                        avg_x = sum(p[0] for p in self.position_history) / len(self.position_history)
+                        avg_y = sum(p[1] for p in self.position_history) / len(self.position_history)
+                        self.hand_position = (avg_x, avg_y)
+                    else:
+                        self.hand_position = (raw_x, raw_y)
 
                     # Count fingers
                     self.finger_count = self._count_fingers(hand_landmarks)
@@ -163,10 +202,24 @@ class HandTracker:
                         self.mp_drawing_styles.get_default_hand_landmarks_style(),
                         self.mp_drawing_styles.get_default_hand_connections_style()
                     )
+
+                    # Draw landmark IDs on frame and highlight index finger tip
+                    for id, cx, cy in self.landmarks_list:
+                        # Draw landmark ID number (small white text)
+                        cv2.putText(frame, str(id), (cx, cy), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+                        
+                        # Highlight index finger tip (#8) with yellow circle
+                        if id == 8:  # INDEX_FINGER_TIP
+                            cv2.circle(frame, (cx, cy), 10, (0, 255, 255), 2)
+                            cv2.putText(frame, "TRACK", (cx + 15, cy), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                 else:
                     self.has_hand = False
                     self.landmarks = None
+                    self.landmarks_list = []
                     self.finger_count = 0
+                    self.position_history.clear()  # Clear history when hand is lost
 
             # Store frame with landmarks drawn
             self.latest_frame = frame

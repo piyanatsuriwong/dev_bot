@@ -97,6 +97,7 @@ class NumBotApp:
         self.target_x = 0.0
         self.target_y = 0.0
         self.has_target = False
+        self.prev_has_target = False  # Track previous state for smooth re-detection
 
         # Demo mode
         self.demo_timer = 0
@@ -253,9 +254,23 @@ class NumBotApp:
                 self.update_roboeyes()
 
                 # Update servo
-                if self.servo and self.servo.enabled and self.has_target:
-                    self.servo.track_normalized(self.target_x, self.target_y)
-                    self.servo.update()
+                if self.servo and self.servo.enabled:
+                    if self.has_target:
+                        # Reset smoothing when hand is detected for the first time
+                        if not self.prev_has_target and hasattr(self.servo, 'reset_smoothing'):
+                            self.servo.reset_smoothing()
+                        
+                        # Support both old (track_normalized + update) and new (track_hand) API
+                        if hasattr(self.servo, 'track_hand'):
+                            # New API: track_hand with built-in smoothing (lower = smoother)
+                            self.servo.track_hand(self.target_x, self.target_y, smoothing=0.1)
+                        else:
+                            # Old API: track_normalized + update
+                            self.servo.track_normalized(self.target_x, self.target_y)
+                            self.servo.update()
+                    
+                    # Update previous state
+                    self.prev_has_target = self.has_target
 
                 # Update HDMI display
                 self.update_hdmi()

@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Servo Controller - PCA9685 Pan-Tilt Control
-For NumBot Robot Eye Tracker
-Based on Server-pi5/servo.py
+Servo Controller using PCA9685 for Pan-Tilt tracking
+- Servo 0 (Channel 0): Pan (left-right, X axis)
+- Servo 1 (Channel 1): Tilt (up-down, Y axis)
 """
 
 import time
-import config
 
 # Try to import PCA9685
 try:
@@ -22,174 +20,211 @@ class ServoController:
     """
     Pan-Tilt Servo Controller using PCA9685
 
-    Channels (from Server-pi5):
-    - Channel 8: Pan (horizontal)
-    - Channel 9: Tilt (vertical)
+    Servo mapping:
+    - Channel 0 -> PCA9685 channel 8 (Pan: left-right)
+    - Channel 1 -> PCA9685 channel 9 (Tilt: up-down)
     """
 
-    def __init__(self):
-        self.enabled = config.SERVO_ENABLED and PCA9685_AVAILABLE
-        self.pca = None
+    # Servo angle limits
+    PAN_MIN = 0
+    PAN_MAX = 180
+    PAN_CENTER = 90
 
-        # Servo configuration from config
-        self.pan_channel = config.SERVO_PAN_CHANNEL      # Channel 8
-        self.tilt_channel = config.SERVO_TILT_CHANNEL    # Channel 9
+    TILT_MIN = 0       # Maximum downward tilt (can look straight down)
+    TILT_MAX = 180     # Maximum upward tilt (full range)
+    TILT_CENTER = 90
+    
+    # Deadzone (ignore small movements to reduce jitter)
+    DEADZONE_DEGREES = 1.5  # Don't move if change is less than this
 
-        self.pan_min = config.SERVO_PAN_MIN
-        self.pan_max = config.SERVO_PAN_MAX
-        self.pan_center = config.SERVO_PAN_CENTER
-
-        self.tilt_min = config.SERVO_TILT_MIN
-        self.tilt_max = config.SERVO_TILT_MAX
-        self.tilt_center = config.SERVO_TILT_CENTER
-
-        self.smoothing = config.SERVO_SMOOTHING
+    def __init__(self, i2c_address=0x40):
+        self.enabled = False
+        self.pwm = None
 
         # Current positions
-        self.current_pan = self.pan_center
-        self.current_tilt = self.tilt_center
-        self.target_pan = self.pan_center
-        self.target_tilt = self.tilt_center
+        self.pan_angle = self.PAN_CENTER
+        self.tilt_angle = self.TILT_CENTER
 
-        if self.enabled:
-            self._init_pca9685()
+        # Smoothing targets
+        self.pan_target = self.PAN_CENTER
+        self.tilt_target = self.TILT_CENTER
+        
+        # First detection flag (for smooth initial movement)
+        self.first_detection = True
+        self.detection_count = 0
 
-    def _init_pca9685(self):
-        """Initialize PCA9685"""
-        try:
-            self.pca = PCA9685(address=config.SERVO_I2C_ADDRESS, debug=True)
-            self.pca.setPWMFreq(config.SERVO_FREQUENCY)
-            time.sleep(0.1)
+        if PCA9685_AVAILABLE:
+            try:
+                self.pwm = PCA9685(i2c_address, debug=False)
+                self.pwm.setPWMFreq(50)  # 50Hz for servos
 
-            # Move to center position
-            self.center()
+                # Center both servos on startup
+                self._set_servo_angle(0, self.PAN_CENTER)
+                self._set_servo_angle(1, self.TILT_CENTER)
 
-            print(f"ServoController: PCA9685 @ 0x{config.SERVO_I2C_ADDRESS:02X}")
-            print(f"  Pan (Ch{self.pan_channel}): {self.pan_min}-{self.pan_max} deg")
-            print(f"  Tilt (Ch{self.tilt_channel}): {self.tilt_min}-{self.tilt_max} deg")
+                self.enabled = True
+                print(f"ServoController: PCA9685 @ 0x{i2c_address:02X}")
+                print(f"  Pan (Ch0): {self.PAN_MIN}-{self.PAN_MAX} deg")
+                print(f"  Tilt (Ch1): {self.TILT_MIN}-{self.TILT_MAX} deg")
+            except Exception as e:
+                print(f"ServoController: Failed - {e}")
+                self.enabled = False
+        else:
+            print("ServoController: PCA9685 not available")
 
-        except Exception as e:
-            print(f"ServoController: Failed to initialize PCA9685: {e}")
-            self.enabled = False
-            self.pca = None
-
-    def _angle_to_pulse(self, angle, error=10):
+    def _set_servo_angle(self, channel, angle, error=10):
         """
-        Convert angle (0-180) to pulse width
-        Formula from Server-pi5/servo.py: 500 + (angle + error) / 0.09
+        Set servo angle (0-180 degrees)
+
+        Args:
+            channel: 0 for Pan, 1 for Tilt
+            angle: Angle in degrees (0-180)
+            error: Calibration offset
         """
+        if not self.enabled or self.pwm is None:
+            return
+
+        angle = int(angle)
+
+        # Map channel to PCA9685 channel (0->8, 1->9)
+        pca_channel = 8 + channel
+
+        # Convert angle to pulse width
+        # 500us = 0 deg, 2500us = 180 deg
         pulse = 500 + int((angle + error) / 0.09)
-        return pulse
+
+        self.pwm.setServoPulse(pca_channel, pulse)
 
     def set_pan(self, angle):
-        """Set pan angle (0-180 degrees)"""
-        if not self.enabled or self.pca is None:
-            return
-
-        angle = max(self.pan_min, min(self.pan_max, angle))
-        pulse = self._angle_to_pulse(angle)
-        self.pca.setServoPulse(self.pan_channel, pulse)
-        self.current_pan = angle
+        """Set pan angle (left-right)"""
+        angle = max(self.PAN_MIN, min(self.PAN_MAX, angle))
+        self.pan_angle = angle
+        self._set_servo_angle(0, angle)
 
     def set_tilt(self, angle):
-        """Set tilt angle (0-180 degrees)"""
-        if not self.enabled or self.pca is None:
-            return
-
-        angle = max(self.tilt_min, min(self.tilt_max, angle))
-        pulse = self._angle_to_pulse(angle)
-        self.pca.setServoPulse(self.tilt_channel, pulse)
-        self.current_tilt = angle
+        """Set tilt angle (up-down)"""
+        angle = max(self.TILT_MIN, min(self.TILT_MAX, angle))
+        self.tilt_angle = angle
+        self._set_servo_angle(1, angle)
 
     def set_position(self, pan, tilt):
         """Set both pan and tilt angles"""
         self.set_pan(pan)
         self.set_tilt(tilt)
 
+    def set_angle(self, angle):
+        """Compatibility: Set pan angle only"""
+        self.set_pan(angle)
+
     def center(self):
-        """Move servos to center position"""
-        self.set_position(self.pan_center, self.tilt_center)
-        self.target_pan = self.pan_center
-        self.target_tilt = self.tilt_center
+        """Center both servos"""
+        self.set_position(self.PAN_CENTER, self.TILT_CENTER)
+    
+    def reset_smoothing(self):
+        """Reset smoothing for new detection"""
+        self.first_detection = True
+        self.detection_count = 0
 
-    def track_normalized(self, x, y):
+    def track_hand(self, hand_x, hand_y=0, smoothing=0.15, debug=False):
         """
-        Track target using normalized coordinates (-1 to 1)
-        x: -1 (left) to 1 (right)
-        y: -1 (up) to 1 (down)
-        
-        Natural tracking (servo follows hand direction):
-        - Hand left (x=-1) → servo pans left (pan_min)
-        - Hand right (x=1) → servo pans right (pan_max)
-        - Hand up (y=-1) → servo tilts up (tilt_min)
-        - Hand down (y=1) → servo tilts down (tilt_max)
-        """
-        # Convert normalized coordinates to angles
-        pan_range = self.pan_max - self.pan_min
-        tilt_range = self.tilt_max - self.tilt_min
+        Track hand position with servos
 
-        # Map -1..1 to angle range with natural tracking
-        # x: -1→pan_min, 0→pan_center, 1→pan_max
-        # y: -1→tilt_min, 0→tilt_center, 1→tilt_max
-        self.target_pan = self.pan_center + (x * pan_range / 2)
-        self.target_tilt = self.tilt_center + (y * tilt_range / 2)
-
-        # Clamp to limits
-        self.target_pan = max(self.pan_min, min(self.pan_max, self.target_pan))
-        self.target_tilt = max(self.tilt_min, min(self.tilt_max, self.target_tilt))
-
-    def update(self):
-        """
-        Update servo positions with smoothing
-        Call this in the main loop for smooth motion
+        Args:
+            hand_x: Normalized X position (-1 to 1, left to right)
+            hand_y: Normalized Y position (-1 to 1, top to bottom)
+            smoothing: Smoothing factor (0-1, lower = smoother)
+            debug: Print debug info
         """
         if not self.enabled:
             return
 
-        # Apply smoothing
-        if self.smoothing > 0:
-            self.current_pan += (self.target_pan - self.current_pan) * (1 - self.smoothing)
-            self.current_tilt += (self.target_tilt - self.current_tilt) * (1 - self.smoothing)
-        else:
-            self.current_pan = self.target_pan
-            self.current_tilt = self.target_tilt
+        # Convert normalized position to servo angles
+        # hand_x: -1 (left) to 1 (right)
+        # Pan: direct mapping (no inversion here)
+        target_pan = self.PAN_CENTER + (hand_x * (self.PAN_MAX - self.PAN_MIN) / 2)
 
-        # Set servo positions
-        self.set_pan(self.current_pan)
-        self.set_tilt(self.current_tilt)
+        # hand_y: -1 (top) to 1 (bottom)
+        # Tilt: follow hand direction
+        target_tilt = self.TILT_CENTER + (hand_y * (self.TILT_MAX - self.TILT_MIN) / 2)
+
+        # Apply deadzone - ignore small movements to reduce jitter
+        # Use smaller deadzone for tilt to make it more responsive
+        pan_diff = abs(target_pan - self.pan_target)
+        tilt_diff = abs(target_tilt - self.tilt_target)
+        
+        if pan_diff > self.DEADZONE_DEGREES:
+            self.pan_target = target_pan
+        if tilt_diff > (self.DEADZONE_DEGREES * 0.5):  # Tilt more sensitive (half deadzone)
+            self.tilt_target = target_tilt
+        
+        # Extra smooth for first detection (first 20 frames for smoother start)
+        effective_smoothing_pan = smoothing
+        effective_smoothing_tilt = smoothing * 1.3  # Tilt faster (1.5x smoothing factor)
+        
+        if self.first_detection or self.detection_count < 20:
+            effective_smoothing_pan = max(0.03, smoothing * 0.2)
+            effective_smoothing_tilt = max(0.05, smoothing * 0.3)  # Tilt starts faster
+            self.detection_count += 1
+            if self.detection_count >= 20:
+                self.first_detection = False
+
+        # Smooth movement with exponential moving average
+        # Tilt uses higher smoothing factor = more responsive
+        new_pan = self.pan_angle + (self.pan_target - self.pan_angle) * effective_smoothing_pan
+        new_tilt = self.tilt_angle + (self.tilt_target - self.tilt_angle) * effective_smoothing_tilt
+        
+        # Only update servo if change is significant (reduce micro-jitter)
+        # Tilt uses smaller threshold for more responsiveness
+        if abs(new_pan - self.pan_angle) > 0.3:
+            self.pan_angle = new_pan
+            self.set_pan(self.pan_angle)
+        if abs(new_tilt - self.tilt_angle) > 0.15:  # Tilt: lower threshold = more responsive
+            self.tilt_angle = new_tilt
+            self.set_tilt(self.tilt_angle)
+
+        if debug:
+            print(f"Servo: Pan={self.pan_angle:.1f} Tilt={self.tilt_angle:.1f}")
 
     def cleanup(self):
-        """Cleanup servo controller"""
-        if self.enabled and self.pca is not None:
+        """Return servos to center position"""
+        if self.enabled:
             self.center()
-            time.sleep(0.3)
             print("ServoController: Cleaned up")
 
 
-# Test function
-if __name__ == "__main__":
-    print("Testing ServoController (Channels 8 & 9)...")
+# Test code
+if __name__ == '__main__':
+    print("Testing ServoController (PCA9685)...")
 
     servo = ServoController()
 
     if servo.enabled:
-        print("\nMoving to center...")
+        print("\nCentering servos...")
         servo.center()
         time.sleep(1)
 
-        print("Testing pan sweep...")
+        print("\nTesting Pan (left-right)...")
         for angle in [45, 90, 135, 90]:
-            print(f"  Pan: {angle} degrees")
+            print(f"  Pan: {angle}")
             servo.set_pan(angle)
             time.sleep(0.5)
 
-        print("Testing tilt sweep...")
+        print("\nTesting Tilt (up-down)...")
         for angle in [60, 90, 120, 90]:
-            print(f"  Tilt: {angle} degrees")
+            print(f"  Tilt: {angle}")
             servo.set_tilt(angle)
             time.sleep(0.5)
+
+        print("\nTesting tracking simulation...")
+        import math
+        for i in range(100):
+            # Simulate circular motion
+            x = math.sin(i * 0.1)
+            y = math.cos(i * 0.1) * 0.5
+            servo.track_hand(x, y, smoothing=0.2)
+            time.sleep(0.05)
 
         servo.cleanup()
         print("\nTest complete!")
     else:
-        print("ServoController not available")
+        print("Servo not available for testing")
