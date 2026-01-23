@@ -107,7 +107,7 @@ class NumBotApp:
         self.target_y = 0.0
         self.has_target = False
         self.prev_has_target = False  # Track previous state for smooth re-detection
-        self.finger_count = 0  # Current finger count for display
+        self.finger_count = -1  # Current finger count for display (-1 = no hand)
 
         # LCD overlay text (displayed at bottom center)
         self.overlay_text = ""  # Text to show on LCD (finger count, detection, etc.)
@@ -135,6 +135,61 @@ class NumBotApp:
         # Create pygame surface for RoboEyes
         self.screen = pygame.Surface((config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
 
+    def draw_mouth(self, finger_count):
+        """
+        Draw mouth shape based on finger count
+        0 = Angry mouth (frown)
+        1 = Curious mouth (small O)
+        2 = Happy mouth (small smile)
+        3 = Tired mouth (horizontal line)
+        4 = Scary mouth (zigzag)
+        5 = Default mouth (wide smile)
+        """
+        # Mouth position (centered at bottom)
+        center_x = config.SCREEN_WIDTH // 2
+        bottom_y = config.SCREEN_HEIGHT - 8
+        
+        # Scale mouth size based on screen width
+        mouth_width = int(config.SCREEN_WIDTH * 0.3)  # 30% of screen width
+        mouth_height = int(config.SCREEN_WIDTH * 0.08)  # 8% of screen width
+        
+        color = (255, 255, 255)  # White
+        
+        if finger_count == 0:  # ANGRY - Inverted smile (frown)
+            # Arc facing down
+            rect = pygame.Rect(center_x - mouth_width//2, bottom_y - mouth_height, 
+                              mouth_width, mouth_height * 2)
+            pygame.draw.arc(self.screen, color, rect, 0, 3.14159, 3)
+            
+        elif finger_count == 1:  # CURIOUS - Small circle (O)
+            radius = mouth_height
+            pygame.draw.circle(self.screen, color, (center_x, bottom_y - radius), radius, 2)
+            
+        elif finger_count == 2:  # HAPPY - Small smile
+            rect = pygame.Rect(center_x - mouth_width//2, bottom_y - mouth_height*2, 
+                              mouth_width, mouth_height * 2)
+            pygame.draw.arc(self.screen, color, rect, 3.14159, 6.28318, 3)
+            
+        elif finger_count == 3:  # TIRED - Horizontal line
+            pygame.draw.line(self.screen, color, 
+                           (center_x - mouth_width//2, bottom_y - mouth_height),
+                           (center_x + mouth_width//2, bottom_y - mouth_height), 3)
+            
+        elif finger_count == 4:  # SCARY - Zigzag mouth
+            points = [
+                (center_x - mouth_width//2, bottom_y - mouth_height),
+                (center_x - mouth_width//4, bottom_y - mouth_height*2),
+                (center_x, bottom_y - mouth_height),
+                (center_x + mouth_width//4, bottom_y - mouth_height*2),
+                (center_x + mouth_width//2, bottom_y - mouth_height)
+            ]
+            pygame.draw.lines(self.screen, color, False, points, 3)
+            
+        else:  # 5 = DEFAULT - Wide smile
+            rect = pygame.Rect(center_x - mouth_width//2, bottom_y - mouth_height*3, 
+                              mouth_width, mouth_height * 3)
+            pygame.draw.arc(self.screen, color, rect, 3.14159, 6.28318, 3)
+
     def init_roboeyes(self):
         """Initialize RoboEyes animation engine"""
         # Initialize LCD font FIRST (needed in callback)
@@ -143,14 +198,9 @@ class NumBotApp:
         self.lcd_font = pygame.font.Font(None, font_size)
 
         def robo_show(roboeyes):
-            # Draw overlay text BEFORE sending to display (fixes flickering)
-            if self.overlay_text and self.lcd_font:
-                text_surface = self.lcd_font.render(self.overlay_text, True, (255, 255, 255))  # White for visibility
-                text_rect = text_surface.get_rect()
-                # Center at bottom with padding
-                text_rect.centerx = config.SCREEN_WIDTH // 2
-                text_rect.bottom = config.SCREEN_HEIGHT - 4
-                self.screen.blit(text_surface, text_rect)
+            # Draw mouth based on finger count (instead of text)
+            if self.finger_count >= 0 and self.mode == config.MODE_HAND:
+                self.draw_mouth(self.finger_count)
 
             if self.display:
                 self.display.draw_from_surface(self.screen)
@@ -401,10 +451,8 @@ class NumBotApp:
                 self.target_y = y
                 self.has_target = True
 
-                # Store finger count for LCD display
+                # Store finger count for mouth display
                 self.finger_count = self.hand_tracker.finger_count
-                # Set overlay text (centered at bottom)
-                self.overlay_text = str(self.finger_count)
 
                 # Update mood based on finger count
                 mood_name = self.hand_tracker.get_mood_from_fingers()
@@ -413,8 +461,7 @@ class NumBotApp:
                     self.set_mood(mood)
             else:
                 self.has_target = False
-                self.finger_count = 0
-                self.overlay_text = ""
+                self.finger_count = -1  # No mouth when no hand
 
     def update_ai_mode(self):
         """Update AI/YOLO mode"""
