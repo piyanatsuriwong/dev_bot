@@ -134,6 +134,8 @@ FINGER_MOOD_MAP = {
 YOLO_CONFIDENCE_THRESHOLD = 0.5
 YOLO_DEFAULT_TARGET = "person"
 YOLO_MODEL = "YOLO11n"  # Options: "YOLO11n", "YOLOv8n"
+YOLO_FRAME_RATE = 5     # Lower = more stable (IMX500 inference is slow)
+# Note: First run takes 2-3 minutes to upload firmware to IMX500
 
 # =============================================================================
 # Servo Configuration (PCA9685)

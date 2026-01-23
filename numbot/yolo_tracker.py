@@ -587,8 +587,21 @@ class DummyYoloTracker:
         pass
 
 
-def create_yolo_tracker(confidence_threshold=0.5, frame_rate=10):
+def create_yolo_tracker(confidence_threshold=None, frame_rate=None):
     """Factory function to create appropriate YOLO tracker"""
+    # Use config values if not specified
+    try:
+        import config
+        if confidence_threshold is None:
+            confidence_threshold = getattr(config, 'YOLO_CONFIDENCE_THRESHOLD', 0.5)
+        if frame_rate is None:
+            frame_rate = getattr(config, 'YOLO_FRAME_RATE', 5)
+    except ImportError:
+        if confidence_threshold is None:
+            confidence_threshold = 0.5
+        if frame_rate is None:
+            frame_rate = 5
+
     if YOLO_AVAILABLE:
         return YoloTracker(confidence_threshold, frame_rate)
     else:
