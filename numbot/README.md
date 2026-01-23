@@ -26,6 +26,7 @@ Robot eye tracking system for Raspberry Pi 5 with ST7735S/GC9A01A display.
 |-----|------|-------------|
 | DC | GPIO 6 | Data/Command |
 | RST | GPIO 13 | Reset |
+| BLK | GPIO 5 | Backlight |
 | CS | GPIO 8 | Chip Select |
 | MOSI | GPIO 10 | SPI Data |
 | SCLK | GPIO 11 | SPI Clock |
@@ -128,6 +129,7 @@ ST7735_HEIGHT = 128
 ST7735_SPI_PORT = 1
 ST7735_DC_PIN = 6
 ST7735_RST_PIN = 13
+ST7735_BL_PIN = 5
 
 # Servo settings
 SERVO_I2C_ADDRESS = 0x40

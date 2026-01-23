@@ -189,9 +189,16 @@ class ST7735Display:
         self._write_data([0x03, 0x1d, 0x07, 0x06, 0x2E, 0x2C, 0x29, 0x2D,
                           0x2E, 0x2E, 0x37, 0x3F, 0x00, 0x00, 0x02, 0x10])
 
+        # Normal Display Mode On (fixes garbage pixels)
+        self._write_cmd(CMD_NORON)
+        time.sleep(0.01)
+
         # Display ON
         self._write_cmd(CMD_DISPON)
         time.sleep(0.1)
+
+        # Clear entire display memory (including hidden area) to remove garbage
+        self._clear_full_memory()
         self.clear()
 
     def _reset(self):
@@ -250,6 +257,25 @@ class ST7735Display:
         self._write_data([y0 >> 8, y0 & 0xFF, y1 >> 8, y1 & 0xFF])
 
         self._write_cmd(CMD_RAMWR)
+
+    def _clear_full_memory(self):
+        """Clear entire display memory including hidden areas (fixes garbage pixels)"""
+        if not RPI_AVAILABLE:
+            return
+        # ST7735S has 132x162 memory - clear it all regardless of display size
+        mem_width = 132
+        mem_height = 162
+
+        # Set window to full memory area (no offset)
+        self._write_cmd(CMD_CASET)
+        self._write_data([0x00, 0x00, 0x00, mem_width - 1])
+        self._write_cmd(CMD_RASET)
+        self._write_data([0x00, 0x00, 0x00, mem_height - 1])
+        self._write_cmd(CMD_RAMWR)
+
+        # Write black pixels to entire memory (RGB565 = 0x0000)
+        black_data = bytes([0x00] * (mem_width * mem_height * 2))
+        self._write_data(black_data)
 
     def clear(self, color=(0, 0, 0)):
         """Clear display with color"""

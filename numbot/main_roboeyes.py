@@ -19,8 +19,13 @@ import sys
 import random
 import time
 import argparse
+import os
 
 import config
+
+# Sound configuration
+SOUND_ENABLED = True
+SOUND_HAPPY = "assets/sounds/Voicy_WALL-E 4.mp3"
 from roboeyes import *
 from servo_controller import ServoController
 
@@ -85,6 +90,10 @@ class NumBotApp:
         self.hand_tracker = None
         self.yolo_tracker = None
 
+        # Sound
+        self.sound_happy = None
+        self.sound_cooldown = 0  # Cooldown timer to prevent sound spam
+
         # HDMI display
         self.hdmi_screen = None
         self.clock = None
@@ -98,6 +107,10 @@ class NumBotApp:
         self.target_y = 0.0
         self.has_target = False
         self.prev_has_target = False  # Track previous state for smooth re-detection
+        self.finger_count = 0  # Current finger count for display
+
+        # LCD overlay text (displayed at bottom center)
+        self.overlay_text = ""  # Text to show on LCD (finger count, detection, etc.)
 
         # Demo mode
         self.demo_timer = 0
@@ -107,6 +120,9 @@ class NumBotApp:
         self.frame_count = 0
         self.fps_time = time.time()
         self.actual_fps = 0
+
+        # LCD overlay font (for finger count display)
+        self.lcd_font = None
 
     def init_display(self):
         """Initialize SPI display for robot eyes"""
@@ -121,14 +137,32 @@ class NumBotApp:
 
     def init_roboeyes(self):
         """Initialize RoboEyes animation engine"""
+        # Initialize LCD font FIRST (needed in callback)
+        pygame.font.init()
+        font_size = 20 if config.SCREEN_WIDTH >= 160 else 16
+        self.lcd_font = pygame.font.Font(None, font_size)
+
         def robo_show(roboeyes):
+            # Draw overlay text BEFORE sending to display (fixes flickering)
+            if self.overlay_text and self.lcd_font:
+                text_surface = self.lcd_font.render(self.overlay_text, True, (255, 255, 255))  # White for visibility
+                text_rect = text_surface.get_rect()
+                # Center at bottom with padding
+                text_rect.centerx = config.SCREEN_WIDTH // 2
+                text_rect.bottom = config.SCREEN_HEIGHT - 4
+                self.screen.blit(text_surface, text_rect)
+
             if self.display:
                 self.display.draw_from_surface(self.screen)
+
+        # Get smoothing from config (default 0.15 for smooth movement)
+        smoothing = getattr(config, 'EYE_SMOOTHING', 0.15)
 
         self.robo = RoboEyes(
             self.screen, config.SCREEN_WIDTH, config.SCREEN_HEIGHT,
             frame_rate=config.DISPLAY_FPS, on_show=robo_show,
-            bgcolor=config.EYE_BG_COLOR, fgcolor=config.EYE_FG_COLOR
+            bgcolor=config.EYE_BG_COLOR, fgcolor=config.EYE_FG_COLOR,
+            smoothing=smoothing
         )
 
         # Configure eye dimensions
@@ -209,6 +243,18 @@ class NumBotApp:
 
         # Initialize Pygame
         pygame.init()
+
+        # Initialize sound
+        if SOUND_ENABLED:
+            try:
+                pygame.mixer.init()
+                if os.path.exists(SOUND_HAPPY):
+                    self.sound_happy = pygame.mixer.Sound(SOUND_HAPPY)
+                    print(f"Sound: Loaded {SOUND_HAPPY}")
+                else:
+                    print(f"Sound: File not found {SOUND_HAPPY}")
+            except Exception as e:
+                print(f"Sound: Init failed - {e}")
 
         # Initialize components
         self.init_display()
@@ -334,6 +380,15 @@ class NumBotApp:
         self.robo.mood = mood
         print(f"Mood: {MOOD_NAMES.get(mood, 'UNKNOWN')}")
 
+        # Play sound for HAPPY mood (with 3 second cooldown)
+        now = time.time()
+        if mood == HAPPY and self.sound_happy and now > self.sound_cooldown:
+            try:
+                self.sound_happy.play()
+                self.sound_cooldown = now + 3.0  # 3 seconds cooldown
+            except Exception:
+                pass
+
     def update_hand_mode(self):
         """Update hand tracking mode"""
         if not self.hand_tracker:
@@ -346,6 +401,11 @@ class NumBotApp:
                 self.target_y = y
                 self.has_target = True
 
+                # Store finger count for LCD display
+                self.finger_count = self.hand_tracker.finger_count
+                # Set overlay text (centered at bottom)
+                self.overlay_text = str(self.finger_count)
+
                 # Update mood based on finger count
                 mood_name = self.hand_tracker.get_mood_from_fingers()
                 mood = MOOD_FROM_NAME.get(mood_name, DEFAULT)
@@ -353,6 +413,8 @@ class NumBotApp:
                     self.set_mood(mood)
             else:
                 self.has_target = False
+                self.finger_count = 0
+                self.overlay_text = ""
 
     def update_ai_mode(self):
         """Update AI/YOLO mode"""
@@ -364,8 +426,15 @@ class NumBotApp:
             self.target_x = x
             self.target_y = y
             self.has_target = True
+            # Set overlay text with detection labels
+            labels = self.yolo_tracker.get_detection_text(max_items=2)
+            if labels:
+                self.overlay_text = ", ".join(labels)
+            else:
+                self.overlay_text = ""
         else:
             self.has_target = False
+            self.overlay_text = ""
 
     def update_demo_mode(self):
         """Update demo mode with random movements"""
@@ -384,14 +453,16 @@ class NumBotApp:
             max_y = self.robo.get_screen_constraint_Y()
 
             # Convert normalized coords to eye position
-            # Note: X is inverted for natural tracking
-            eye_x = int((1 - (self.target_x + 1) / 2) * max_x)
+            # X: -1 (left) to +1 (right) -> 0 to max_x
+            # Y: -1 (top) to +1 (bottom) -> 0 to max_y
+            eye_x = int(((self.target_x + 1) / 2) * max_x)
             eye_y = int(((self.target_y + 1) / 2) * max_y)
 
             self.robo.eyeLxNext = max(0, min(max_x, eye_x))
             self.robo.eyeLyNext = max(0, min(max_y, eye_y))
 
         self.robo.update()
+        # Note: overlay_text is drawn in robo_show callback (fixes flickering)
 
     def update_hdmi(self):
         """Update HDMI display"""

@@ -132,7 +132,7 @@ class Sequences(list):
 
 
 class RoboEyes:
-    def __init__(self, fb, width, height, frame_rate=20, on_show=None, bgcolor=BGCOLOR, fgcolor=FGCOLOR):
+    def __init__(self, fb, width, height, frame_rate=20, on_show=None, bgcolor=BGCOLOR, fgcolor=FGCOLOR, smoothing=0.15):
         assert on_show is not None, "on_show event not defined"
         self.fb = fb
         self.gfx = FBUtil(fb)
@@ -141,6 +141,10 @@ class RoboEyes:
         self.screenHeight = height
         self.bgcolor = bgcolor
         self.fgcolor = fgcolor
+
+        # Smoothing factor for eye movement (0.0 = no movement, 1.0 = instant)
+        # Lower values = smoother but slower, Higher values = faster but more jerky
+        self.smoothing = smoothing
 
         self.sequences = Sequences(self)
         self.fpsTimer = 0
@@ -471,7 +475,14 @@ class RoboEyes:
         self.idle = False
         self.blink(left=left, right=right)
 
+    def _lerp(self, current, target, factor):
+        """Linear interpolation for smooth movement"""
+        return current + (target - current) * factor
+
     def draw_eyes(self):
+        # Smoothing factor (use class attribute or default)
+        s = self.smoothing
+
         # Curious gaze offsets
         if self._curious:
             if self.eyeLxNext <= 10:
@@ -489,14 +500,12 @@ class RoboEyes:
             self.eyeLheightOffset = 0
             self.eyeRheightOffset = 0
 
-        # Eye heights
-        self.eyeLheightCurrent = (self.eyeLheightCurrent + self.eyeLheightNext + self.eyeLheightOffset) // 2
-        self.eyeLy += (self.eyeLheightDefault - self.eyeLheightCurrent) // 2
-        self.eyeLy -= self.eyeLheightOffset // 2
-
-        self.eyeRheightCurrent = (self.eyeRheightCurrent + self.eyeRheightNext + self.eyeRheightOffset) // 2
-        self.eyeRy += (self.eyeRheightDefault - self.eyeRheightCurrent) // 2
-        self.eyeRy -= self.eyeRheightOffset // 2
+        # Eye heights (use faster smoothing for blink animations)
+        blink_smooth = min(s * 3, 0.5)  # Faster for blink
+        target_L_height = self.eyeLheightNext + self.eyeLheightOffset
+        target_R_height = self.eyeRheightNext + self.eyeRheightOffset
+        self.eyeLheightCurrent = int(self._lerp(self.eyeLheightCurrent, target_L_height, blink_smooth))
+        self.eyeRheightCurrent = int(self._lerp(self.eyeRheightCurrent, target_R_height, blink_smooth))
 
         # Open eyes after closing
         if self.eyeL_open:
@@ -507,25 +516,25 @@ class RoboEyes:
             if self.eyeRheightCurrent <= (1 + self.eyeRheightOffset):
                 self.eyeRheightNext = self.eyeRheightDefault
 
-        # Eye widths
-        self.eyeLwidthCurrent = (self.eyeLwidthCurrent + self.eyeLwidthNext) // 2
-        self.eyeRwidthCurrent = (self.eyeRwidthCurrent + self.eyeRwidthNext) // 2
+        # Eye widths (smooth)
+        self.eyeLwidthCurrent = int(self._lerp(self.eyeLwidthCurrent, self.eyeLwidthNext, s))
+        self.eyeRwidthCurrent = int(self._lerp(self.eyeRwidthCurrent, self.eyeRwidthNext, s))
 
-        # Space between
-        self.spaceBetweenCurrent = (self.spaceBetweenCurrent + self.spaceBetweenNext) // 2
+        # Space between (smooth)
+        self.spaceBetweenCurrent = int(self._lerp(self.spaceBetweenCurrent, self.spaceBetweenNext, s))
 
-        # Eye coordinates
-        self.eyeLx = (self.eyeLx + self.eyeLxNext) // 2
-        self.eyeLy = (self.eyeLy + self.eyeLyNext) // 2
+        # Eye coordinates (smooth lerp - key fix for jerky movement!)
+        self.eyeLx = int(self._lerp(self.eyeLx, self.eyeLxNext, s))
+        self.eyeLy = int(self._lerp(self.eyeLy, self.eyeLyNext, s))
 
         self.eyeRxNext = self.eyeLxNext + self.eyeLwidthCurrent + self.spaceBetweenCurrent
         self.eyeRyNext = self.eyeLyNext
-        self.eyeRx = (self.eyeRx + self.eyeRxNext) // 2
-        self.eyeRy = (self.eyeRy + self.eyeRyNext) // 2
+        self.eyeRx = int(self._lerp(self.eyeRx, self.eyeRxNext, s))
+        self.eyeRy = int(self._lerp(self.eyeRy, self.eyeRyNext, s))
 
-        # Border radius
-        self.eyeLborderRadiusCurrent = (self.eyeLborderRadiusCurrent + self.eyeLborderRadiusNext) // 2
-        self.eyeRborderRadiusCurrent = (self.eyeRborderRadiusCurrent + self.eyeRborderRadiusNext) // 2
+        # Border radius (smooth)
+        self.eyeLborderRadiusCurrent = int(self._lerp(self.eyeLborderRadiusCurrent, self.eyeLborderRadiusNext, s))
+        self.eyeRborderRadiusCurrent = int(self._lerp(self.eyeRborderRadiusCurrent, self.eyeRborderRadiusNext, s))
 
         # Autoblinker
         if self.autoblinker:
@@ -593,13 +602,19 @@ class RoboEyes:
         # Draw
         self.clear_display()
 
+        # Calculate draw Y positions with height centering offset (for blink animation)
+        # This keeps the eye vertically centered when height changes during blink
+        # Applied AFTER flicker so flicker still affects the position
+        eyeLy_draw = self.eyeLy + (self.eyeLheightDefault - self.eyeLheightCurrent) // 2 - self.eyeLheightOffset // 2
+        eyeRy_draw = self.eyeRy + (self.eyeRheightDefault - self.eyeRheightCurrent) // 2 - self.eyeRheightOffset // 2
+
         # Left eye
-        self.gfx.fill_rrect(self.eyeLx, self.eyeLy, self.eyeLwidthCurrent,
+        self.gfx.fill_rrect(self.eyeLx, eyeLy_draw, self.eyeLwidthCurrent,
                            self.eyeLheightCurrent, self.eyeLborderRadiusCurrent, self.fgcolor)
 
         # Right eye
         if not self._cyclops:
-            self.gfx.fill_rrect(self.eyeRx, self.eyeRy, self.eyeRwidthCurrent,
+            self.gfx.fill_rrect(self.eyeRx, eyeRy_draw, self.eyeRwidthCurrent,
                                self.eyeRheightCurrent, self.eyeRborderRadiusCurrent, self.fgcolor)
 
         # Mood eyelids
@@ -618,46 +633,46 @@ class RoboEyes:
         else:
             self.eyelidsHappyBottomOffsetNext = 0
 
-        # Tired eyelids
-        self.eyelidsTiredHeight = (self.eyelidsTiredHeight + self.eyelidsTiredHeightNext) // 2
+        # Tired eyelids (smooth transition)
+        self.eyelidsTiredHeight = int(self._lerp(self.eyelidsTiredHeight, self.eyelidsTiredHeightNext, s))
         if not self._cyclops:
-            self.gfx.fill_triangle(self.eyeLx, self.eyeLy - 1,
-                                  self.eyeLx + self.eyeLwidthCurrent, self.eyeLy - 1,
-                                  self.eyeLx, self.eyeLy + self.eyelidsTiredHeight - 1, self.bgcolor)
-            self.gfx.fill_triangle(self.eyeRx, self.eyeRy - 1,
-                                  self.eyeRx + self.eyeRwidthCurrent, self.eyeRy - 1,
-                                  self.eyeRx + self.eyeRwidthCurrent, self.eyeRy + self.eyelidsTiredHeight - 1, self.bgcolor)
+            self.gfx.fill_triangle(self.eyeLx, eyeLy_draw - 1,
+                                  self.eyeLx + self.eyeLwidthCurrent, eyeLy_draw - 1,
+                                  self.eyeLx, eyeLy_draw + self.eyelidsTiredHeight - 1, self.bgcolor)
+            self.gfx.fill_triangle(self.eyeRx, eyeRy_draw - 1,
+                                  self.eyeRx + self.eyeRwidthCurrent, eyeRy_draw - 1,
+                                  self.eyeRx + self.eyeRwidthCurrent, eyeRy_draw + self.eyelidsTiredHeight - 1, self.bgcolor)
         else:
-            self.gfx.fill_triangle(self.eyeLx, self.eyeLy - 1,
-                                  self.eyeLx + (self.eyeLwidthCurrent // 2), self.eyeLy - 1,
-                                  self.eyeLx, self.eyeLy + self.eyelidsTiredHeight - 1, self.bgcolor)
-            self.gfx.fill_triangle(self.eyeLx + (self.eyeLwidthCurrent // 2), self.eyeLy - 1,
-                                  self.eyeLx + self.eyeLwidthCurrent, self.eyeLy - 1,
-                                  self.eyeLx + self.eyeLwidthCurrent, self.eyeLy + self.eyelidsTiredHeight - 1, self.bgcolor)
+            self.gfx.fill_triangle(self.eyeLx, eyeLy_draw - 1,
+                                  self.eyeLx + (self.eyeLwidthCurrent // 2), eyeLy_draw - 1,
+                                  self.eyeLx, eyeLy_draw + self.eyelidsTiredHeight - 1, self.bgcolor)
+            self.gfx.fill_triangle(self.eyeLx + (self.eyeLwidthCurrent // 2), eyeLy_draw - 1,
+                                  self.eyeLx + self.eyeLwidthCurrent, eyeLy_draw - 1,
+                                  self.eyeLx + self.eyeLwidthCurrent, eyeLy_draw + self.eyelidsTiredHeight - 1, self.bgcolor)
 
-        # Angry eyelids
-        self.eyelidsAngryHeight = (self.eyelidsAngryHeight + self.eyelidsAngryHeightNext) // 2
+        # Angry eyelids (smooth transition)
+        self.eyelidsAngryHeight = int(self._lerp(self.eyelidsAngryHeight, self.eyelidsAngryHeightNext, s))
         if not self._cyclops:
-            self.gfx.fill_triangle(self.eyeLx, self.eyeLy - 1,
-                                  self.eyeLx + self.eyeLwidthCurrent, self.eyeLy - 1,
-                                  self.eyeLx + self.eyeLwidthCurrent, self.eyeLy + self.eyelidsAngryHeight - 1, self.bgcolor)
-            self.gfx.fill_triangle(self.eyeRx, self.eyeRy - 1,
-                                  self.eyeRx + self.eyeRwidthCurrent, self.eyeRy - 1,
-                                  self.eyeRx, self.eyeRy + self.eyelidsAngryHeight - 1, self.bgcolor)
+            self.gfx.fill_triangle(self.eyeLx, eyeLy_draw - 1,
+                                  self.eyeLx + self.eyeLwidthCurrent, eyeLy_draw - 1,
+                                  self.eyeLx + self.eyeLwidthCurrent, eyeLy_draw + self.eyelidsAngryHeight - 1, self.bgcolor)
+            self.gfx.fill_triangle(self.eyeRx, eyeRy_draw - 1,
+                                  self.eyeRx + self.eyeRwidthCurrent, eyeRy_draw - 1,
+                                  self.eyeRx, eyeRy_draw + self.eyelidsAngryHeight - 1, self.bgcolor)
         else:
-            self.gfx.fill_triangle(self.eyeLx, self.eyeLy - 1,
-                                  self.eyeLx + (self.eyeLwidthCurrent // 2), self.eyeLy - 1,
-                                  self.eyeLx + (self.eyeLwidthCurrent // 2), self.eyeLy + self.eyelidsAngryHeight - 1, self.bgcolor)
-            self.gfx.fill_triangle(self.eyeLx + (self.eyeLwidthCurrent // 2), self.eyeLy - 1,
-                                  self.eyeLx + self.eyeLwidthCurrent, self.eyeLy - 1,
-                                  self.eyeLx + (self.eyeLwidthCurrent // 2), self.eyeLy + self.eyelidsAngryHeight - 1, self.bgcolor)
+            self.gfx.fill_triangle(self.eyeLx, eyeLy_draw - 1,
+                                  self.eyeLx + (self.eyeLwidthCurrent // 2), eyeLy_draw - 1,
+                                  self.eyeLx + (self.eyeLwidthCurrent // 2), eyeLy_draw + self.eyelidsAngryHeight - 1, self.bgcolor)
+            self.gfx.fill_triangle(self.eyeLx + (self.eyeLwidthCurrent // 2), eyeLy_draw - 1,
+                                  self.eyeLx + self.eyeLwidthCurrent, eyeLy_draw - 1,
+                                  self.eyeLx + (self.eyeLwidthCurrent // 2), eyeLy_draw + self.eyelidsAngryHeight - 1, self.bgcolor)
 
-        # Happy eyelids
-        self.eyelidsHappyBottomOffset = (self.eyelidsHappyBottomOffset + self.eyelidsHappyBottomOffsetNext) // 2
-        self.gfx.fill_rrect(self.eyeLx - 1, (self.eyeLy + self.eyeLheightCurrent) - self.eyelidsHappyBottomOffset + 1,
+        # Happy eyelids (smooth transition)
+        self.eyelidsHappyBottomOffset = int(self._lerp(self.eyelidsHappyBottomOffset, self.eyelidsHappyBottomOffsetNext, s))
+        self.gfx.fill_rrect(self.eyeLx - 1, (eyeLy_draw + self.eyeLheightCurrent) - self.eyelidsHappyBottomOffset + 1,
                           self.eyeLwidthCurrent + 2, self.eyeLheightDefault, self.eyeLborderRadiusCurrent, self.bgcolor)
         if not self._cyclops:
-            self.gfx.fill_rrect(self.eyeRx - 1, (self.eyeRy + self.eyeRheightCurrent) - self.eyelidsHappyBottomOffset + 1,
+            self.gfx.fill_rrect(self.eyeRx - 1, (eyeRy_draw + self.eyeRheightCurrent) - self.eyelidsHappyBottomOffset + 1,
                               self.eyeRwidthCurrent + 2, self.eyeRheightDefault, self.eyeRborderRadiusCurrent, self.bgcolor)
 
         self.on_show(self)

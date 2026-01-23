@@ -15,14 +15,16 @@ DISPLAY_MODE = "st7735s"  # ST7735S as default display
 # =============================================================================
 ST7735_WIDTH = 160
 ST7735_HEIGHT = 128
-ST7735_OFFSET_X = 0
-ST7735_OFFSET_Y = 0
+# ST7735S has 132x162 memory but 128x160 display - need offset to avoid garbage pixels
+# For landscape mode with MADCTL 0x68: X maps to rows, Y maps to columns
+ST7735_OFFSET_X = 1   # Column offset
+ST7735_OFFSET_Y = 2   # Row offset (smaller value for landscape)
 
 ST7735_SPI_PORT = 1      # SPI1
 ST7735_SPI_CS = 0        # CS0
 ST7735_DC_PIN = 6        # GPIO 6
 ST7735_RST_PIN = 13      # GPIO 13
-ST7735_BL_PIN = None     # Not connected
+ST7735_BL_PIN = 5        # GPIO 5 (Pin 29)
 ST7735_SPI_SPEED = 24000000  # 24 MHz
 
 # =============================================================================
@@ -63,8 +65,12 @@ else:  # pygame
     EYE_RADIUS = 20
 
 FPS = 30
-DISPLAY_FPS = 20  # Robot display refresh rate
+DISPLAY_FPS = 30  # Robot display refresh rate (increased for smoother animation)
 CAPTION = "NumBot Eye Tracker v3.0"
+
+# Eye movement smoothing (0.0 = no movement, 1.0 = instant)
+# Lower = smoother but slower, Higher = faster but more jerky
+EYE_SMOOTHING = 0.15  # Smooth eye tracking
 
 # =============================================================================
 # Colors
@@ -107,8 +113,9 @@ CAMERA_IMX500_FPS = 30
 # Hand Tracking Configuration (MediaPipe)
 # =============================================================================
 MEDIAPIPE_MAX_HANDS = 1
-MEDIAPIPE_DETECTION_CONFIDENCE = 0.5
-MEDIAPIPE_TRACKING_CONFIDENCE = 0.5
+MEDIAPIPE_DETECTION_CONFIDENCE = 0.7    # High accuracy detection (0.5 -> 0.7)
+MEDIAPIPE_TRACKING_CONFIDENCE = 0.7     # High accuracy tracking (0.5 -> 0.7)
+MEDIAPIPE_MODEL_COMPLEXITY = 0          # Lite model (0=lite, 1=full, 2=heavy) - fastest & stable for Pi5
 
 # Finger count to mood mapping
 # 0 (Fist) -> ANGRY, 1 -> CURIOUS, 2 -> HAPPY, 3 -> TIRED, 4 -> SCARY, 5 (Open) -> DEFAULT

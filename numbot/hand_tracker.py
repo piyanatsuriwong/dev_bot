@@ -107,9 +107,10 @@ class HandTracker:
             static_image_mode=False,
             max_num_hands=config.MEDIAPIPE_MAX_HANDS,
             min_detection_confidence=config.MEDIAPIPE_DETECTION_CONFIDENCE,
-            min_tracking_confidence=config.MEDIAPIPE_TRACKING_CONFIDENCE
+            min_tracking_confidence=config.MEDIAPIPE_TRACKING_CONFIDENCE,
+            model_complexity=config.MEDIAPIPE_MODEL_COMPLEXITY
         )
-        print("HandTracker: MediaPipe initialized")
+        print(f"HandTracker: MediaPipe initialized (complexity={config.MEDIAPIPE_MODEL_COMPLEXITY})")
 
     def start(self):
         """Start camera and tracking"""
@@ -169,14 +170,19 @@ class HandTracker:
                     # Get landmarks list for drawing
                     self.landmarks_list = self._get_landmarks_list(hand_landmarks, frame.shape)
 
-                    # Track INDEX FINGER TIP (landmark #8) instead of palm
-                    # This is more accurate and responsive for tracking
-                    index_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
+                    # Track PALM CENTER (middle of hand) instead of finger tip
+                    # Calculate palm center from wrist and middle finger MCP
+                    wrist = hand_landmarks.landmark[self.mp_hands.HandLandmark.WRIST]
+                    middle_mcp = hand_landmarks.landmark[self.mp_hands.HandLandmark.MIDDLE_FINGER_MCP]
+                    
+                    # Palm center = midpoint between wrist and middle finger MCP
+                    palm_center_x = (wrist.x + middle_mcp.x) / 2
+                    palm_center_y = (wrist.y + middle_mcp.y) / 2
 
                     # Convert to normalized coordinates (-1 to 1)
                     # INVERT X for mirror effect (camera view is mirrored)
-                    raw_x = -(index_tip.x * 2 - 1)  # Inverted: 0→1, 1→-1 (mirror X)
-                    raw_y = (index_tip.y * 2 - 1)   # Normal Y: 0→-1, 1→1 (top to bottom)
+                    raw_x = -(palm_center_x * 2 - 1)  # Inverted: 0→1, 1→-1 (mirror X)
+                    raw_y = (palm_center_y * 2 - 1)   # Normal Y: 0→-1, 1→1 (top to bottom)
                     
                     # Add to history for moving average smoothing
                     self.position_history.append((raw_x, raw_y))
@@ -203,17 +209,20 @@ class HandTracker:
                         self.mp_drawing_styles.get_default_hand_connections_style()
                     )
 
-                    # Draw landmark IDs on frame and highlight index finger tip
+                    # Draw landmark IDs on frame and highlight palm center
+                    h, w, _ = frame.shape
+                    palm_cx = int(palm_center_x * w)
+                    palm_cy = int(palm_center_y * h)
+                    
                     for id, cx, cy in self.landmarks_list:
                         # Draw landmark ID number (small white text)
                         cv2.putText(frame, str(id), (cx, cy), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
-                        
-                        # Highlight index finger tip (#8) with yellow circle
-                        if id == 8:  # INDEX_FINGER_TIP
-                            cv2.circle(frame, (cx, cy), 10, (0, 255, 255), 2)
-                            cv2.putText(frame, "TRACK", (cx + 15, cy), 
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                    
+                    # Highlight palm center with yellow circle
+                    cv2.circle(frame, (palm_cx, palm_cy), 15, (0, 255, 255), 3)
+                    cv2.putText(frame, "TRACK", (palm_cx + 20, palm_cy), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                 else:
                     self.has_hand = False
                     self.landmarks = None

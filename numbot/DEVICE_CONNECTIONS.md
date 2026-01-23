@@ -16,7 +16,7 @@
 
 | รายการ | Interface | Pin/Connection | ขนาด | สถานะ |
 |--------|-----------|----------------|------|--------|
-| **ST7735S** | SPI1 | CS0, DC=GPIO6, RST=GPIO13 | 160x128 | ✅ Active (Default) |
+| **ST7735S** | SPI1 | CS0, DC=6, RST=13, BLK=5 | 160x128 | ✅ Active (Default) |
 | **GC9A01A** | SPI1 | CS0, DC=GPIO6, RST=GPIO13 | 240x240 (Round) | 🔄 Alternative |
 | **Pygame Window** | HDMI | - | 800x480 | 🔄 Fallback |
 
@@ -184,7 +184,7 @@ VOICE_AVAILABLE = False  # Force disabled
 
 | # | Device | Interface | GPIO/I2C/USB | Library | Mode | Status |
 |---|--------|-----------|--------------|---------|------|--------|
-| 1 | ST7735S Display | SPI1 | DC=6, RST=13, CS0 | st7735_display | All | ✅ Active |
+| 1 | ST7735S Display | SPI1 | DC=6, RST=13, CS0, BLK=5 | st7735_display | All | ✅ Active |
 | 2 | GC9A01A Display (Alt) | SPI1 | DC=6, RST=13, CS0 | gc9a01a_display | All | 🔄 Optional |
 | 3 | IMX708 HQ Camera | CSI-2 | /dev/video0 | Picamera2 | HAND | ✅ Active |
 | 4 | IMX500 AI Camera | CSI-2 | /dev/video1 | modlib.AiCamera | AI | ✅ Active |
@@ -257,6 +257,7 @@ ST7735_SPI_PORT = 1      # SPI1
 ST7735_SPI_CS = 0        # CS0 (GPIO 8)
 ST7735_DC_PIN = 6        # Data/Command
 ST7735_RST_PIN = 13      # Reset
+ST7735_BL_PIN = 5        # Backlight (GPIO 5)
 ST7735_SPI_SPEED = 24000000  # 24 MHz
 ```
 
