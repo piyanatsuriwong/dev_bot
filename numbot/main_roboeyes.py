@@ -8,8 +8,14 @@ Based on PROJECT_REQUIREMENTS.md v3.0
 
 Modes:
 - HAND: Hand tracking with IMX708 + MediaPipe
-- AI: YOLO object detection with IMX500
+- AI: YOLO object detection with IMX500 (DETECT/TRACK sub-modes)
 - DEMO: Demo mode (no camera)
+- AUTO: Auto-switch between modes
+
+Features:
+- Beautiful text rendering on ST7735S display
+- Mode switching with keyboard (H/D/T/A keys)
+- IMX500 for object detection only
 """
 
 import pygame
@@ -22,6 +28,17 @@ import argparse
 import os
 
 import config
+
+# Import new modules
+try:
+    from core.mode_manager import ModeManager, Mode
+    from core.tracker_result import TrackerResult, Detection
+    from display.display_renderer import DisplayRenderer
+    from display.text_renderer import TextRenderer, Colors
+    NEW_MODULES_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: New modules not available: {e}")
+    NEW_MODULES_AVAILABLE = False
 
 # Sound configuration
 SOUND_ENABLED = True
@@ -99,6 +116,11 @@ class NumBotApp:
         self.clock = None
         self.font = None
         self.small_font = None
+
+        # New modules (v4.0)
+        self.mode_manager = None
+        self.display_renderer = None
+        self.use_new_display = False  # Use new display renderer
 
         # State
         self.running = False
@@ -284,6 +306,59 @@ class NumBotApp:
             self.yolo_tracker = None
             return False
 
+    def init_mode_manager(self):
+        """Initialize ModeManager for unified mode handling"""
+        if not NEW_MODULES_AVAILABLE:
+            print("ModeManager: Not available (modules not loaded)")
+            return False
+
+        # Map mode string to Mode enum
+        mode_map = {
+            config.MODE_HAND: Mode.HAND,
+            config.MODE_AI: Mode.DETECT,  # AI mode starts as DETECT
+            config.MODE_DEMO: Mode.DEMO,
+        }
+        initial_mode = mode_map.get(self.mode, Mode.DEMO)
+
+        self.mode_manager = ModeManager(
+            hand_tracker=self.hand_tracker,
+            yolo_tracker=self.yolo_tracker,
+            dual_camera_mode=True,
+            default_mode=initial_mode,
+            default_target=getattr(config, 'YOLO_DEFAULT_TARGET', 'person')
+        )
+
+        # Set callbacks
+        self.mode_manager.set_mode_change_callback(self.on_mode_change)
+
+        print(f"ModeManager: Initialized (mode={initial_mode.value})")
+        return True
+
+    def init_display_renderer(self):
+        """Initialize DisplayRenderer for beautiful text on ST7735S"""
+        if not NEW_MODULES_AVAILABLE:
+            print("DisplayRenderer: Not available (modules not loaded)")
+            return False
+
+        font_path = getattr(config, 'TEXT_FONT_PATH', None)
+        self.display_renderer = DisplayRenderer(
+            config.SCREEN_WIDTH,
+            config.SCREEN_HEIGHT,
+            font_path
+        )
+
+        print(f"DisplayRenderer: Initialized ({config.SCREEN_WIDTH}x{config.SCREEN_HEIGHT})")
+        return True
+
+    def on_mode_change(self, new_mode: Mode):
+        """Callback when mode changes via ModeManager"""
+        mode_str = new_mode.value.upper()
+        print(f"Mode changed to: {mode_str}")
+
+        # Update window title
+        if self.hdmi_screen:
+            pygame.display.set_caption(f"NumBot - {mode_str} Mode")
+
     def run(self):
         """Main application loop"""
         print("=" * 50)
@@ -322,13 +397,24 @@ class NumBotApp:
                 print("Falling back to DEMO mode")
                 self.mode = config.MODE_DEMO
 
+        # Initialize new modules (v4.0)
+        if NEW_MODULES_AVAILABLE:
+            self.init_mode_manager()
+            self.init_display_renderer()
+            # Enable new display if detection panel is desired
+            self.use_new_display = getattr(config, 'USE_NEW_DISPLAY', False)
+
         print("\nKeyboard Controls:")
         print("  ESC   - Exit")
         print("  SPACE - Random mood")
         print("  1-6   - Set mood (1=Default, 2=Happy, 3=Angry, 4=Tired, 5=Scary, 6=Curious)")
-        if self.mode == config.MODE_AI:
-            print("  D     - DETECT mode")
-            print("  T     - TRACK mode")
+        print("\nMode Switching (v4.0):")
+        print("  H     - HAND mode (hand tracking)")
+        print("  D     - DETECT mode (show all objects)")
+        print("  T     - TRACK mode (follow target)")
+        print("  A     - AUTO mode (smart switching)")
+        print("  M     - Cycle modes")
+        print("  N     - Cycle track targets")
         print()
 
         self.running = True
@@ -416,13 +502,60 @@ class NumBotApp:
                 elif event.key == pygame.K_6:
                     self.set_mood(CURIOUS)
 
-                elif event.key == pygame.K_d and self.mode == config.MODE_AI:
-                    if self.yolo_tracker and YoloMode:
-                        self.yolo_tracker.set_mode(YoloMode.DETECT)
+                # Mode switching keys (v4.0)
+                elif event.key == pygame.K_h:
+                    # Switch to HAND mode
+                    if self.mode_manager:
+                        if self.mode_manager.switch_mode(Mode.HAND):
+                            self.mode = config.MODE_HAND
+                    elif self.hand_tracker:
+                        self.mode = config.MODE_HAND
+                        print("Mode: HAND")
 
-                elif event.key == pygame.K_t and self.mode == config.MODE_AI:
-                    if self.yolo_tracker and YoloMode:
+                elif event.key == pygame.K_d:
+                    # Switch to DETECT mode
+                    if self.mode_manager:
+                        self.mode_manager.switch_mode(Mode.DETECT)
+                        self.mode = config.MODE_AI
+                    elif self.yolo_tracker and YoloMode:
+                        self.yolo_tracker.set_mode(YoloMode.DETECT)
+                        self.mode = config.MODE_AI
+
+                elif event.key == pygame.K_t:
+                    # Switch to TRACK mode
+                    if self.mode_manager:
+                        self.mode_manager.switch_mode(Mode.TRACK)
+                        self.mode = config.MODE_AI
+                    elif self.yolo_tracker and YoloMode:
                         self.yolo_tracker.set_mode(YoloMode.TRACK)
+                        self.mode = config.MODE_AI
+
+                elif event.key == pygame.K_a:
+                    # Switch to AUTO mode
+                    if self.mode_manager:
+                        self.mode_manager.switch_mode(Mode.AUTO)
+                        print("Mode: AUTO")
+
+                elif event.key == pygame.K_m:
+                    # Cycle through modes
+                    if self.mode_manager:
+                        new_mode = self.mode_manager.cycle_mode()
+                        # Update local mode
+                        if new_mode == Mode.HAND:
+                            self.mode = config.MODE_HAND
+                        elif new_mode in [Mode.DETECT, Mode.TRACK]:
+                            self.mode = config.MODE_AI
+                        else:
+                            self.mode = config.MODE_DEMO
+
+                elif event.key == pygame.K_n:
+                    # Cycle track targets
+                    if self.mode_manager:
+                        new_target = self.mode_manager.cycle_target()
+                        print(f"Track target: {new_target}")
+                        # Also update YOLO tracker if available
+                        if self.yolo_tracker:
+                            self.yolo_tracker.set_track_target(new_target)
 
     def set_mood(self, mood):
         """Set robot mood"""
@@ -600,18 +733,26 @@ class NumBotApp:
         """Draw status bar at bottom"""
         y = config.HDMI_HEIGHT - 35
 
-        # Mode
-        self.draw_text(f"Mode: {self.mode.upper()}", 10, y, (0, 255, 255))
+        # Mode (use ModeManager if available)
+        if self.mode_manager:
+            mode_name = self.mode_manager.mode_name.upper()
+            target = self.mode_manager.track_target if self.mode_manager.is_track_mode() else None
+            if target:
+                self.draw_text(f"Mode: {mode_name} ({target})", 10, y, (0, 255, 255))
+            else:
+                self.draw_text(f"Mode: {mode_name}", 10, y, (0, 255, 255))
+        else:
+            self.draw_text(f"Mode: {self.mode.upper()}", 10, y, (0, 255, 255))
 
         # Mood
         mood_name = MOOD_NAMES.get(self.current_mood, "UNKNOWN")
-        self.draw_text(f"Mood: {mood_name}", 200, y, (255, 255, 0))
+        self.draw_text(f"Mood: {mood_name}", 250, y, (255, 255, 0))
 
         # FPS
-        self.draw_text(f"FPS: {self.actual_fps:.1f}", 400, y, (200, 200, 200))
+        self.draw_text(f"FPS: {self.actual_fps:.1f}", 430, y, (200, 200, 200))
 
         # Controls hint
-        self.draw_text("ESC=Exit  SPACE=Random  1-6=Moods", 600, y, (100, 100, 100), small=True)
+        self.draw_text("H/D/T/A=Mode M=Cycle N=Target", 530, y, (100, 100, 100), small=True)
 
     def draw_text(self, text, x, y, color, small=False):
         """Draw text on HDMI display"""

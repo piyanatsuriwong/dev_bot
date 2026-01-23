@@ -184,3 +184,22 @@ TARGET_HAND_LATENCY_MS = 50     # < 50ms for hand tracking
 TARGET_YOLO_LATENCY_MS = 77     # ~77ms for YOLO inference
 TARGET_CPU_USAGE = 60           # < 60%
 TARGET_MEMORY_MB = 2048         # < 2GB
+
+# =============================================================================
+# New Display Features (v4.0)
+# =============================================================================
+USE_NEW_DISPLAY = False          # Use new DisplayRenderer for ST7735S
+DUAL_CAMERA_MODE = True          # Run both cameras simultaneously
+
+# Text rendering settings
+TEXT_FONT_PATH = None            # Path to custom font (None = system font)
+TEXT_SHOW_ICONS = True           # Show emoji-like icons in detection labels
+TEXT_SHOW_CONFIDENCE = True      # Show confidence bars in detection labels
+TEXT_MAX_DETECTIONS = 2          # Max detections to show on ST7735S info panel
+
+# Mode manager settings
+MODE_AUTO_HAND_PRIORITY = True   # Hand detection takes priority in auto mode
+MODE_SWITCH_ANIMATION = False    # Show animation during mode switch
+
+# Default track targets for cycling
+TRACK_TARGETS = ['person', 'cat', 'dog', 'bird', 'car', 'bottle', 'cup']
