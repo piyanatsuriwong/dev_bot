@@ -4,6 +4,14 @@
 
 เอกสารนี้อธิบาย feature การใช้กล้อง IMX500 สำหรับตรวจจับวัตถุ พร้อมแสดงผลบนจอ ST7735S โดยยังคงรักษา feature ใบหน้าหุ่นยนต์ (Robot Eyes) ไว้
 
+### Implementation Status ✅
+
+**Current Implementation:**
+- **Module:** `yolo_tracker_v2.py`
+- **Backend:** `modlib` (Primary) using **YOLO11n**
+- **Performance:** ~10-11 FPS (Real-time)
+- **Status:** Object Detection Working
+
 ---
 
 ## 1. Feature Requirements
@@ -25,8 +33,8 @@
 ┌─────────────────────────────────────────────────┐
 │              Camera Assignment                   │
 ├─────────────────────────────────────────────────┤
-│  IMX500 (CSI Port 1)  →  Object Detection ONLY  │
-│  IMX708 (CSI Port 0)  →  Hand Tracking          │
+│  IMX500 (CSI Port 0)  →  Object Detection ONLY  │
+│  IMX708 (CSI Port 1)  →  Hand Tracking          │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -34,45 +42,36 @@
 
 ## 2. Architecture Design
 
-### 2.1 Proposed File Structure
+### 2.1 Current File Structure
 
 ```
 numbot/
-├── main_roboeyes.py          # Main entry point (simplified)
+├── main_roboeyes.py          # Main entry point
 ├── config.py                 # Configuration
 │
-├── core/                     # Core modules (NEW)
-│   ├── __init__.py
-│   ├── app_controller.py     # Application controller (extracted from main)
-│   ├── mode_manager.py       # Mode switching logic
-│   └── event_handler.py      # Keyboard/Voice events
+├── yolo_tracker_v2.py        # ⭐ YOLO Object Detection (modlib/Picamera2)
+├── yolo_tracker.py           # Legacy tracker (deprecated)
+├── hand_tracker.py           # Hand tracking logic
 │
-├── display/                  # Display modules (NEW)
-│   ├── __init__.py
-│   ├── st7735_display.py     # Hardware driver (existing)
-│   ├── display_renderer.py   # Rendering logic
-│   ├── text_renderer.py      # Beautiful text rendering
-│   └── ui_components.py      # Reusable UI components
+├── imx500_detector.py        # Standalone detector utility
 │
-├── tracking/                 # Tracking modules (NEW)
-│   ├── __init__.py
-│   ├── hand_tracker.py       # MediaPipe hand (existing)
-│   ├── yolo_tracker.py       # YOLO object (existing)
-│   └── tracker_interface.py  # Abstract tracker interface
-│
-├── animation/                # Animation modules (NEW)
-│   ├── __init__.py
-│   ├── roboeyes.py           # Robot eyes (existing)
-│   ├── face_animator.py      # Face animation controller
-│   └── mouth_drawer.py       # Mouth drawing logic
-│
-└── hardware/                 # Hardware control (NEW)
-    ├── __init__.py
-    ├── servo_controller.py   # Servo (existing)
-    └── PCA9685.py            # PWM driver (existing)
+├── docs/
+    └── FEATURE_IMX500_DETECTION.md
 ```
 
-### 2.2 Module Dependency Diagram
+### 2.2 Key Module: `yolo_tracker_v2.py`
+
+This module is a drop-in replacement for the original `yolo_tracker.py` but enhanced for stability:
+
+```python
+# Usage in main_roboeyes.py
+from yolo_tracker_v2 import create_yolo_tracker, YoloMode
+
+tracker = create_yolo_tracker(model="yolov8n", use_modlib=True)
+tracker.start()
+```
+
+### 2.3 Module Dependency Diagram
 
 ```
                     ┌─────────────────────┐
@@ -80,27 +79,18 @@ numbot/
                     │  (Entry Point)      │
                     └──────────┬──────────┘
                                │
-                    ┌──────────▼──────────┐
-                    │   AppController     │
-                    │   (core/)           │
-                    └──────────┬──────────┘
-                               │
          ┌─────────────────────┼─────────────────────┐
          │                     │                     │
 ┌────────▼────────┐  ┌─────────▼─────────┐  ┌───────▼───────┐
-│  ModeManager    │  │  DisplayRenderer  │  │  FaceAnimator │
-│  - HAND mode    │  │  - ST7735S driver │  │  - RoboEyes   │
-│  - DETECT mode  │  │  - Text renderer  │  │  - Mouth      │
-│  - Switching    │  │  - UI components  │  │  - Moods      │
-└────────┬────────┘  └─────────┬─────────┘  └───────────────┘
-         │                     │
-┌────────▼────────┐  ┌─────────▼─────────┐
-│  HandTracker    │  │  TextRenderer     │
-│  (IMX708)       │  │  - Thai font      │
-│                 │  │  - English font   │
-├─────────────────┤  │  - Icons          │
-│  YoloTracker    │  │  - Animations     │
-│  (IMX500)       │  └───────────────────┘
+│  HandTracker    │  │   ST7735Display   │  │  RoboEyes     │
+│  (IMX708)       │  │   - Display       │  │  - Animation  │
+│  - MediaPipe    │  │   - Text render   │  │  - Moods      │
+│                 │  │                   │  │               │
+├─────────────────┤  └───────────────────┘  └───────────────┘
+│ YoloTrackerV2   │
+│  (IMX500)       │
+│  - modlib       │
+│  - YOLO11n      │
 └─────────────────┘
 ```
 
@@ -759,5 +749,6 @@ python3 main_roboeyes.py --mode track --target cat
 
 ---
 
-*Document Version: 1.0*
-*Last Updated: 2026-01-23*
+*Document Version: 1.1*
+*Last Updated: 2026-01-24*
+*Status: IMX500 Object Detection Implemented with yolo_tracker_v2*
