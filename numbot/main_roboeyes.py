@@ -56,6 +56,14 @@ except ImportError:
     YoloMode = None
     print("Warning: YOLO Tracker not available")
 
+# Import IMX500 Detector for HAND+AI mode
+try:
+    from imx500_detector import IMX500Detector, IMX500_AVAILABLE
+except ImportError:
+    IMX500_AVAILABLE = False
+    IMX500Detector = None
+    print("Warning: IMX500 Detector not available")
+
 
 # Mood name mapping
 MOOD_NAMES = {
@@ -93,10 +101,14 @@ class NumBotApp:
         self.servo = None
         self.hand_tracker = None
         self.yolo_tracker = None
+        self.imx500_detector = None  # IMX500 detector for HAND+AI mode
 
         # Sound
         self.sound_happy = None
         self.sound_cooldown = 0  # Cooldown timer to prevent sound spam
+
+        # IMX500 detection text (shown on LCD in HAND mode)
+        self.imx500_text = ""
 
         # HDMI display
         self.hdmi_screen = None
@@ -194,6 +206,71 @@ class NumBotApp:
                               mouth_width, mouth_height * 3)
             pygame.draw.arc(self.screen, color, rect, 3.14159, 6.28318, 3)
 
+    def draw_detection_overlay(self, text):
+        """
+        Draw IMX500 detection text at top of LCD screen
+        Shows what objects are detected by YOLO
+        Beautiful compact display for small screens
+        """
+        if not text or not self.lcd_font:
+            return
+
+        # Extract just the object names (remove scores for cleaner look)
+        # Input: "person:85%, cup:72%" -> Output: "👁 person, cup"
+        parts = text.split(", ")
+        labels = []
+        for part in parts[:2]:  # Max 2 items for small screen
+            if ":" in part:
+                labels.append(part.split(":")[0])
+            else:
+                labels.append(part)
+        
+        # Create display text with icon
+        display_text = "👁 " + ", ".join(labels) if labels else ""
+        
+        # Truncate if too long
+        max_chars = config.SCREEN_WIDTH // 7
+        if len(display_text) > max_chars:
+            display_text = display_text[:max_chars-1] + "…"
+
+        # Use smaller font for overlay
+        small_font = pygame.font.Font(None, 16)
+        
+        # Render text with glow effect
+        glow_color = (0, 80, 80)  # Dark cyan glow
+        text_color = (0, 255, 200)  # Bright cyan-green
+        
+        text_surf = small_font.render(display_text, True, text_color)
+        glow_surf = small_font.render(display_text, True, glow_color)
+        
+        # Position at top center
+        x = (config.SCREEN_WIDTH - text_surf.get_width()) // 2
+        y = 2
+        
+        # Draw rounded background pill
+        padding_x = 6
+        padding_y = 2
+        bg_rect = pygame.Rect(
+            x - padding_x, 
+            y - padding_y, 
+            text_surf.get_width() + padding_x * 2, 
+            text_surf.get_height() + padding_y * 2
+        )
+        
+        # Semi-transparent dark background with rounded corners
+        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(bg_surface, (0, 0, 0, 180), bg_surface.get_rect(), border_radius=8)
+        self.screen.blit(bg_surface, bg_rect.topleft)
+        
+        # Draw subtle border
+        pygame.draw.rect(self.screen, (0, 100, 100), bg_rect, 1, border_radius=8)
+        
+        # Draw glow (offset slightly)
+        self.screen.blit(glow_surf, (x + 1, y + 1))
+        
+        # Draw main text
+        self.screen.blit(text_surf, (x, y))
+
     def init_roboeyes(self):
         """Initialize RoboEyes animation engine"""
         # Initialize LCD font FIRST (needed in callback)
@@ -205,6 +282,10 @@ class NumBotApp:
             # Draw mouth based on finger count (instead of text)
             if self.finger_count >= 0 and self.mode == config.MODE_HAND:
                 self.draw_mouth(self.finger_count)
+
+            # Draw IMX500 detection text on LCD (HAND mode with YOLO)
+            if self.imx500_text and self.mode == config.MODE_HAND:
+                self.draw_detection_overlay(self.imx500_text)
 
             if self.display:
                 self.display.draw_from_surface(self.screen)
@@ -288,6 +369,25 @@ class NumBotApp:
             self.yolo_tracker = None
             return False
 
+    def init_imx500_detector(self):
+        """Initialize IMX500 detector for background YOLO detection in HAND mode"""
+        if not IMX500_AVAILABLE or IMX500Detector is None:
+            print("IMX500 Detector: Not available")
+            return False
+
+        self.imx500_detector = IMX500Detector(
+            model="yolo11n",
+            threshold=self.yolo_confidence
+        )
+
+        if self.imx500_detector.start():
+            print("IMX500 Detector: Started (running with hand tracking)")
+            return True
+        else:
+            print("IMX500 Detector: Failed to start")
+            self.imx500_detector = None
+            return False
+
     def run(self):
         """Main application loop"""
         print("=" * 50)
@@ -321,6 +421,9 @@ class NumBotApp:
             if not self.init_hand_tracker():
                 print("Falling back to DEMO mode")
                 self.mode = config.MODE_DEMO
+            else:
+                # Also start IMX500 detector for simultaneous YOLO detection
+                self.init_imx500_detector()
         elif self.mode == config.MODE_AI:
             if not self.init_yolo_tracker():
                 print("Falling back to DEMO mode")
@@ -466,6 +569,10 @@ class NumBotApp:
             else:
                 self.has_target = False
                 self.finger_count = -1  # No mouth when no hand
+
+        # Update IMX500 detection text (runs in parallel)
+        if self.imx500_detector and self.imx500_detector.running:
+            self.imx500_text = self.imx500_detector.get_detection_text()
 
     def update_ai_mode(self):
         """Update AI/YOLO mode"""
@@ -634,6 +741,9 @@ class NumBotApp:
 
         if self.yolo_tracker:
             self.yolo_tracker.cleanup()
+
+        if self.imx500_detector:
+            self.imx500_detector.stop()
 
         if self.servo:
             self.servo.cleanup()
