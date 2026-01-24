@@ -96,15 +96,15 @@ DEFAULT_MODE = MODE_DEMO
 # =============================================================================
 # Camera Configuration
 # =============================================================================
-# IMX708 (HAND Mode) - CSI port 0
+# IMX708 (HAND Mode) - CSI port 1
 # Using 1920x1080 for maximum FOV (Field of View)
-CAMERA_IMX708_NUM = 0
+CAMERA_IMX708_NUM = 1
 CAMERA_IMX708_WIDTH = 1920
 CAMERA_IMX708_HEIGHT = 1080
 CAMERA_IMX708_FPS = 30
 
-# IMX500 (AI Mode) - CSI port 1
-CAMERA_IMX500_NUM = 1
+# IMX500 (AI Mode) - CSI port 0
+CAMERA_IMX500_NUM = 0
 CAMERA_IMX500_WIDTH = 640
 CAMERA_IMX500_HEIGHT = 480
 CAMERA_IMX500_FPS = 30

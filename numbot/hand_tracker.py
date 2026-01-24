@@ -113,14 +113,17 @@ class HandTracker:
         print(f"HandTracker: MediaPipe initialized (complexity={config.MEDIAPIPE_MODEL_COMPLEXITY})")
 
     def start(self):
-        """Start camera and tracking"""
+        """Start camera and tracking - only initialize IMX708"""
         if not PICAMERA2_AVAILABLE:
             print("HandTracker: Picamera2 not available")
             return False
 
         try:
-            # Initialize camera
-            print(f"HandTracker: Opening camera {self.camera_num}...")
+            # Initialize camera - only open the specified camera
+            # Disable debug output to avoid "Device or resource busy" errors from IMX500
+            print(f"HandTracker: Opening camera {self.camera_num} (IMX708)...")
+            
+            # Create camera with only the target camera
             self.camera = Picamera2(camera_num=self.camera_num)
 
             # Configure camera for maximum FOV (Field of View)

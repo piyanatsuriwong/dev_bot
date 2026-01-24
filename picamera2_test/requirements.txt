@@ -1,0 +1,19 @@
+# Picamera2 Test Dependencies
+# Install on Raspberry Pi with: pip install -r requirements.txt
+
+# Picamera2 - Camera library for Raspberry Pi
+# Note: picamera2 should be pre-installed on Raspberry Pi OS
+# If not: sudo apt install python3-picamera2
+picamera2
+
+# Image processing
+numpy
+opencv-python
+Pillow
+
+# For video encoding (may need system dependencies)
+# sudo apt install ffmpeg
+
+# Optional: For AI Camera (IMX500)
+# These are usually pre-installed on Pi with AI Camera support
+# imx500-all

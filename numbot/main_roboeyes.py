@@ -21,6 +21,10 @@ import time
 import argparse
 import os
 
+# Set libcamera environment before importing anything that uses it
+# This prevents libcamera from trying to load IMX500 when using HAND mode
+os.environ.setdefault('LIBCAMERA_LOG_LEVELS', 'ERROR')
+
 import config
 
 # Sound configuration
