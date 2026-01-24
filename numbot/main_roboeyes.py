@@ -109,6 +109,11 @@ class NumBotApp:
 
         # IMX500 detection text (shown on LCD in HAND mode)
         self.imx500_text = ""
+        self.imx500_text_display = ""  # What's actually shown (with hold)
+        self.imx500_last_update = 0  # Time of last detection change
+        self.imx500_hold_duration = 2.0  # Hold detection for 2 seconds
+        self.imx500_is_new = False  # Show "NEW" indicator
+        self.imx500_priority_objects = ["person", "cat", "dog", "bird"]  # Hold these longer
 
         # HDMI display
         self.hdmi_screen = None
@@ -212,11 +217,10 @@ class NumBotApp:
         Shows what objects are detected by YOLO
         Beautiful compact display for small screens
         """
-        if not text or not self.lcd_font:
+        if not text:
             return
 
         # Extract just the object names (remove scores for cleaner look)
-        # Input: "person:85%, cup:72%" -> Output: "👁 person, cup"
         parts = text.split(", ")
         labels = []
         for part in parts[:2]:  # Max 2 items for small screen
@@ -225,51 +229,99 @@ class NumBotApp:
             else:
                 labels.append(part)
         
-        # Create display text with icon
-        display_text = "👁 " + ", ".join(labels) if labels else ""
+        display_text = ", ".join(labels) if labels else ""
+        
+        if not display_text:
+            return
         
         # Truncate if too long
-        max_chars = config.SCREEN_WIDTH // 7
+        max_chars = (config.SCREEN_WIDTH // 7) - 2  # Leave space for icon
         if len(display_text) > max_chars:
-            display_text = display_text[:max_chars-1] + "…"
+            display_text = display_text[:max_chars-1] + ".."
 
-        # Use smaller font for overlay
-        small_font = pygame.font.Font(None, 16)
+        if not self.lcd_font:
+            return
         
-        # Render text with glow effect
-        glow_color = (0, 80, 80)  # Dark cyan glow
-        text_color = (0, 255, 200)  # Bright cyan-green
+        # Colors
+        text_color = (0, 255, 180)  # Bright cyan-green
+        bg_color = (0, 0, 0)  # Solid black background
+        border_color = (0, 120, 100)  # Teal border
+        icon_color = (255, 200, 0)  # Yellow/gold for eye icon
         
-        text_surf = small_font.render(display_text, True, text_color)
-        glow_surf = small_font.render(display_text, True, glow_color)
+        text_surf = self.lcd_font.render(display_text, True, text_color)
+        
+        # Icon size
+        icon_size = 10
+        icon_padding = 4
+        
+        # Total width = icon + padding + text
+        total_width = icon_size + icon_padding + text_surf.get_width()
         
         # Position at top center
-        x = (config.SCREEN_WIDTH - text_surf.get_width()) // 2
-        y = 2
+        start_x = (config.SCREEN_WIDTH - total_width) // 2
+        y = 3
         
-        # Draw rounded background pill
-        padding_x = 6
+        # Draw background pill
+        padding_x = 5
         padding_y = 2
         bg_rect = pygame.Rect(
-            x - padding_x, 
+            start_x - padding_x, 
             y - padding_y, 
-            text_surf.get_width() + padding_x * 2, 
-            text_surf.get_height() + padding_y * 2
+            total_width + padding_x * 2, 
+            max(text_surf.get_height(), icon_size) + padding_y * 2
         )
         
-        # Semi-transparent dark background with rounded corners
-        bg_surface = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
-        pygame.draw.rect(bg_surface, (0, 0, 0, 180), bg_surface.get_rect(), border_radius=8)
-        self.screen.blit(bg_surface, bg_rect.topleft)
+        # Solid background
+        pygame.draw.rect(self.screen, bg_color, bg_rect, border_radius=7)
         
-        # Draw subtle border
-        pygame.draw.rect(self.screen, (0, 100, 100), bg_rect, 1, border_radius=8)
+        # Draw border
+        pygame.draw.rect(self.screen, border_color, bg_rect, 1, border_radius=7)
         
-        # Draw glow (offset slightly)
-        self.screen.blit(glow_surf, (x + 1, y + 1))
+        # Draw eye icon (simple eye shape)
+        icon_x = start_x + icon_size // 2
+        icon_y = y + text_surf.get_height() // 2
         
-        # Draw main text
-        self.screen.blit(text_surf, (x, y))
+        # Eye outer (yellow ellipse) - or green if NEW
+        if self.imx500_is_new and (time.time() - self.imx500_last_update) < 0.5:
+            # Flash green for new detection
+            eye_color = (0, 255, 100)
+        else:
+            eye_color = icon_color
+            self.imx500_is_new = False  # Reset after flash
+        
+        eye_rect = pygame.Rect(icon_x - 5, icon_y - 3, 10, 6)
+        pygame.draw.ellipse(self.screen, eye_color, eye_rect)
+        
+        # Eye pupil (black circle)
+        pygame.draw.circle(self.screen, (0, 0, 0), (icon_x, icon_y), 2)
+        
+        # Eye highlight (white dot)
+        pygame.draw.circle(self.screen, (255, 255, 255), (icon_x + 1, icon_y - 1), 1)
+        
+        # Draw text after icon
+        text_x = start_x + icon_size + icon_padding
+        self.screen.blit(text_surf, (text_x, y))
+        
+        # Draw "NEW!" badge when new detection (for 1 second)
+        time_since_new = time.time() - self.imx500_last_update
+        if self.imx500_is_new and time_since_new < 1.0:
+            # Blinking effect (on/off every 0.2s)
+            if int(time_since_new * 5) % 2 == 0:
+                new_font = pygame.font.Font(None, 14)
+                new_surf = new_font.render("NEW!", True, (255, 255, 255))
+                
+                # Position to the right of the pill
+                new_x = bg_rect.right + 2
+                new_y = y
+                
+                # Red background pill for NEW
+                new_bg = pygame.Rect(new_x, new_y - 1, new_surf.get_width() + 4, new_surf.get_height() + 2)
+                pygame.draw.rect(self.screen, (255, 50, 50), new_bg, border_radius=4)
+                pygame.draw.rect(self.screen, (255, 100, 100), new_bg, 1, border_radius=4)
+                
+                self.screen.blit(new_surf, (new_x + 2, new_y))
+        elif time_since_new >= 1.0:
+            self.imx500_is_new = False  # Reset after 1 second
 
     def init_roboeyes(self):
         """Initialize RoboEyes animation engine"""
@@ -284,8 +336,8 @@ class NumBotApp:
                 self.draw_mouth(self.finger_count)
 
             # Draw IMX500 detection text on LCD (HAND mode with YOLO)
-            if self.imx500_text and self.mode == config.MODE_HAND:
-                self.draw_detection_overlay(self.imx500_text)
+            if self.imx500_text_display and self.mode == config.MODE_HAND:
+                self.draw_detection_overlay(self.imx500_text_display)
 
             if self.display:
                 self.display.draw_from_surface(self.screen)
@@ -572,7 +624,36 @@ class NumBotApp:
 
         # Update IMX500 detection text (runs in parallel)
         if self.imx500_detector and self.imx500_detector.running:
-            self.imx500_text = self.imx500_detector.get_detection_text()
+            new_text = self.imx500_detector.get_detection_text()
+            now = time.time()
+            
+            # Check if we should update display
+            should_update = False
+            time_since_update = now - self.imx500_last_update
+            
+            if new_text != self.imx500_text:
+                # New detection found
+                if new_text:
+                    # Check if it's a priority object (hold current less time)
+                    is_priority = any(obj in new_text.lower() for obj in self.imx500_priority_objects)
+                    
+                    if is_priority:
+                        # Priority object - update immediately
+                        should_update = True
+                        self.imx500_hold_duration = 3.0  # Hold priority objects longer
+                    elif time_since_update >= 1.0:
+                        # Non-priority - wait at least 1 second
+                        should_update = True
+                        self.imx500_hold_duration = 2.0
+                elif time_since_update >= self.imx500_hold_duration:
+                    # No detection and hold time expired
+                    should_update = True
+                
+                if should_update:
+                    self.imx500_text = new_text
+                    self.imx500_text_display = new_text
+                    self.imx500_last_update = now
+                    self.imx500_is_new = bool(new_text)  # Show NEW indicator
 
     def update_ai_mode(self):
         """Update AI/YOLO mode"""
@@ -761,7 +842,7 @@ def main():
                         help='Operating mode (hand/ai/demo)')
     parser.add_argument('--no-hdmi', action='store_true',
                         help='Disable HDMI camera preview')
-    parser.add_argument('--confidence', type=float, default=0.5,
+    parser.add_argument('--confidence', type=float, default=0.7,
                         help='YOLO confidence threshold (0.0-1.0)')
     args = parser.parse_args()
 
