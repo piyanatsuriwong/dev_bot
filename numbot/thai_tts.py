@@ -150,11 +150,10 @@ class ThaiTTS:
         
         # Create cache directory
         os.makedirs(cache_dir, exist_ok=True)
-        
-        # Initialize pygame mixer
+
+        # Start speech thread (uses aplay, not pygame mixer)
         if GTTS_AVAILABLE:
             try:
-                pygame.mixer.init(frequency=44100)
                 self._thread = threading.Thread(target=self._speech_loop, daemon=True)
                 self._thread.start()
                 robot_status = "ON" if robot_voice and PYDUB_AVAILABLE else "OFF"
@@ -207,41 +206,44 @@ class ThaiTTS:
                 print(f"ThaiTTS: Error - {e}")
     
     def _speak_now(self, thai_text):
-        """Generate and play speech"""
+        """Generate and play speech using aplay (avoids pygame mixer conflict)"""
         try:
             # Cache file names (original and robotized)
             text_hash = abs(hash(thai_text))
             cache_file = os.path.join(self.cache_dir, f"{text_hash}.mp3")
             robot_cache_file = os.path.join(self.cache_dir, f"{text_hash}_robot.wav")
-            
+            wav_file = os.path.join(self.cache_dir, f"{text_hash}.wav")
+
             # Determine which file to play
             if self.robot_voice and PYDUB_AVAILABLE:
                 play_file = robot_cache_file
             else:
-                play_file = cache_file
-            
+                play_file = wav_file
+
             # Generate if not cached
             if not os.path.exists(play_file):
                 # First generate normal speech
                 if not os.path.exists(cache_file):
+                    print(f"ThaiTTS: Generating speech for '{thai_text}'")
                     tts = gTTS(text=thai_text, lang='th')
                     tts.save(cache_file)
-                
+
                 # Apply robot effect if enabled
                 if self.robot_voice and PYDUB_AVAILABLE:
                     self._robotize(cache_file, robot_cache_file)
-            
-            # Play audio
+                else:
+                    # Convert mp3 to wav for aplay
+                    if PYDUB_AVAILABLE:
+                        sound = AudioSegment.from_mp3(cache_file)
+                        sound.export(wav_file, format="wav")
+
+            # Play audio using aplay (system command, no pygame conflict)
             self.is_speaking = True
-            pygame.mixer.music.load(play_file)
-            pygame.mixer.music.play()
-            
-            # Wait for playback to finish
-            while pygame.mixer.music.get_busy():
-                time.sleep(0.1)
-            
+            print(f"ThaiTTS: Playing '{thai_text}'")
+            import subprocess
+            subprocess.run(['aplay', '-q', play_file], check=False, timeout=10)
             self.is_speaking = False
-            
+
         except Exception as e:
             print(f"ThaiTTS: Speech error - {e}")
             self.is_speaking = False
@@ -273,8 +275,9 @@ class ThaiTTS:
     def stop(self):
         """Stop TTS"""
         self._running = False
-        if pygame.mixer.get_init():
-            pygame.mixer.music.stop()
+        # Kill any playing aplay process
+        import subprocess
+        subprocess.run(['pkill', '-9', 'aplay'], check=False, capture_output=True)
         if self._thread:
             self._thread.join(timeout=1.0)
         print("ThaiTTS: Stopped")
