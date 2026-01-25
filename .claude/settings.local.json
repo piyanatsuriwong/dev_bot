@@ -24,7 +24,8 @@
       "WebFetch(domain:docs.ultralytics.com)",
       "WebFetch(domain:github.com)",
       "Bash(claude mcp add:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }

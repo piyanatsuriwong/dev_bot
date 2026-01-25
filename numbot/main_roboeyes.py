@@ -21,6 +21,14 @@ import time
 import argparse
 import os
 
+# CPU/Memory monitoring
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("Warning: psutil not available - CPU/Memory monitoring disabled")
+
 # Set libcamera environment before importing anything that uses it
 # This prevents libcamera from trying to load IMX500 when using HAND mode
 os.environ.setdefault('LIBCAMERA_LOG_LEVELS', 'ERROR')
@@ -137,10 +145,20 @@ class NumBotApp:
         self.demo_timer = 0
         self.demo_interval = 2.0
 
-        # FPS tracking
+        # FPS tracking (main loop)
         self.frame_count = 0
         self.fps_time = time.time()
         self.actual_fps = 0
+
+        # CPU/Memory monitoring
+        self.cpu_percent = 0.0
+        self.memory_mb = 0.0
+        self.sys_monitor_time = time.time()
+        self.sys_monitor_interval = 1.0  # Update every 1 second
+
+        # Camera FPS (from trackers)
+        self.imx708_fps = 0.0  # Hand tracker FPS
+        self.imx500_fps = 0.0  # YOLO detector FPS
 
         # LCD overlay font (for finger count display)
         self.lcd_font = None
@@ -530,13 +548,31 @@ class NumBotApp:
                 # Update HDMI display
                 self.update_hdmi()
 
-                # FPS tracking
+                # FPS tracking (main loop)
                 self.frame_count += 1
                 now = time.time()
                 if now - self.fps_time >= 1.0:
                     self.actual_fps = self.frame_count / (now - self.fps_time)
                     self.frame_count = 0
                     self.fps_time = now
+
+                # CPU/Memory monitoring (every 1 second)
+                if PSUTIL_AVAILABLE and now - self.sys_monitor_time >= self.sys_monitor_interval:
+                    self.cpu_percent = psutil.cpu_percent(interval=None)
+                    mem = psutil.virtual_memory()
+                    self.memory_mb = mem.used / (1024 * 1024)
+                    self.sys_monitor_time = now
+
+                    # Print stats to console
+                    print(f"[STATS] CPU:{self.cpu_percent:.0f}% MEM:{self.memory_mb:.0f}MB | 708:{self.imx708_fps:.0f}fps 500:{self.imx500_fps:.0f}fps")
+
+                # Get camera FPS from trackers
+                if self.hand_tracker:
+                    self.imx708_fps = self.hand_tracker.actual_fps
+                if self.imx500_detector and self.imx500_detector.running:
+                    self.imx500_fps = self.imx500_detector.get_fps()
+                if self.yolo_tracker and hasattr(self.yolo_tracker, 'fps'):
+                    self.imx500_fps = self.yolo_tracker.fps
 
                 pygame.display.flip()
                 if self.clock:
@@ -800,13 +836,28 @@ class NumBotApp:
 
         # Mood
         mood_name = MOOD_NAMES.get(self.current_mood, "UNKNOWN")
-        self.draw_text(f"Mood: {mood_name}", 200, y, (255, 255, 0))
+        self.draw_text(f"Mood: {mood_name}", 150, y, (255, 255, 0))
 
-        # FPS
-        self.draw_text(f"FPS: {self.actual_fps:.1f}", 400, y, (200, 200, 200))
+        # CPU/Memory
+        if PSUTIL_AVAILABLE:
+            cpu_color = (0, 255, 0) if self.cpu_percent < 60 else (255, 255, 0) if self.cpu_percent < 80 else (255, 100, 100)
+            self.draw_text(f"CPU:{self.cpu_percent:.0f}%", 320, y, cpu_color)
+            self.draw_text(f"MEM:{self.memory_mb:.0f}MB", 420, y, (200, 200, 200))
+
+        # Camera FPS (IMX708 = Hand, IMX500 = AI)
+        cam_fps_x = 550
+        if self.mode == config.MODE_HAND:
+            # Show both cameras FPS in HAND mode
+            self.draw_text(f"708:{self.imx708_fps:.0f}", cam_fps_x, y, (100, 255, 100))
+            self.draw_text(f"500:{self.imx500_fps:.0f}", cam_fps_x + 70, y, (255, 150, 100))
+        elif self.mode == config.MODE_AI:
+            self.draw_text(f"500:{self.imx500_fps:.0f}", cam_fps_x, y, (255, 150, 100))
+        else:
+            # Demo mode - show main FPS
+            self.draw_text(f"FPS:{self.actual_fps:.0f}", cam_fps_x, y, (200, 200, 200))
 
         # Controls hint
-        self.draw_text("ESC=Exit  SPACE=Random  1-6=Moods", 600, y, (100, 100, 100), small=True)
+        self.draw_text("ESC=Exit SPACE=Random", 720, y, (100, 100, 100), small=True)
 
     def draw_text(self, text, x, y, color, small=False):
         """Draw text on HDMI display"""
