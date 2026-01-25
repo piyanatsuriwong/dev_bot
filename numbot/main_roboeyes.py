@@ -72,6 +72,15 @@ except ImportError:
     IMX500Detector = None
     print("Warning: IMX500 Detector not available")
 
+# Import Thai TTS for speaking detected objects
+try:
+    from thai_tts import ThaiTTS, GTTS_AVAILABLE
+    TTS_AVAILABLE = GTTS_AVAILABLE
+except ImportError:
+    TTS_AVAILABLE = False
+    ThaiTTS = None
+    print("Warning: ThaiTTS not available")
+
 
 # Mood name mapping
 MOOD_NAMES = {
@@ -110,6 +119,7 @@ class NumBotApp:
         self.hand_tracker = None
         self.yolo_tracker = None
         self.imx500_detector = None  # IMX500 detector for HAND+AI mode
+        self.tts = None  # Thai TTS for speaking detected objects
 
         # Sound
         self.sound_happy = None
@@ -458,6 +468,16 @@ class NumBotApp:
             self.imx500_detector = None
             return False
 
+    def init_tts(self):
+        """Initialize Thai TTS for speaking detected objects"""
+        if not TTS_AVAILABLE or ThaiTTS is None:
+            print("ThaiTTS: Not available")
+            return False
+
+        self.tts = ThaiTTS(robot_voice=True)
+        print("ThaiTTS: Initialized")
+        return True
+
     def run(self):
         """Main application loop"""
         print("=" * 50)
@@ -494,6 +514,8 @@ class NumBotApp:
             else:
                 # Also start IMX500 detector for simultaneous YOLO detection
                 self.init_imx500_detector()
+                # Initialize TTS for speaking detected objects
+                self.init_tts()
         elif self.mode == config.MODE_AI:
             if not self.init_yolo_tracker():
                 print("Falling back to DEMO mode")
@@ -693,6 +715,11 @@ class NumBotApp:
                     # Print detection to console
                     if new_text:
                         print(f"Detected: {new_text}")
+                        # Speak detected object (TTS will skip "person")
+                        if self.tts:
+                            # Get first object label
+                            first_label = new_text.split(",")[0].split(":")[0].strip()
+                            self.tts.speak(first_label)
 
     def update_ai_mode(self):
         """Update AI/YOLO mode"""
@@ -879,6 +906,9 @@ class NumBotApp:
 
         if self.imx500_detector:
             self.imx500_detector.stop()
+
+        if self.tts:
+            self.tts.stop()
 
         if self.servo:
             self.servo.cleanup()
