@@ -428,7 +428,7 @@ class NumBotApp:
             return False
 
         self.imx500_detector = IMX500Detector(
-            model="yolo11n",
+            model="yolov8n",
             threshold=self.yolo_confidence
         )
 
@@ -654,6 +654,9 @@ class NumBotApp:
                     self.imx500_text_display = new_text
                     self.imx500_last_update = now
                     self.imx500_is_new = bool(new_text)  # Show NEW indicator
+                    # Print detection to console
+                    if new_text:
+                        print(f"Detected: {new_text}")
 
     def update_ai_mode(self):
         """Update AI/YOLO mode"""
