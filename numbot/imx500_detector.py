@@ -102,7 +102,7 @@ class IMX500Detector:
             
             # Initialize Picamera2
             self.picam2 = Picamera2(self.imx500.camera_num)
-            config = self.picam2.create_preview_configuration(buffer_count=12)
+            config = self.picam2.create_preview_configuration(buffer_count=4)  # Reduced from 12 for lower latency
             self.picam2.configure(config)
             
             # Start camera
@@ -182,7 +182,7 @@ class IMX500Detector:
                     frame_count = 0
                     fps_time = now
                 
-                time.sleep(0.05)  # ~20 FPS
+                time.sleep(0.01)  # ~100 FPS max (was 0.05 = 20 FPS)
                 
             except Exception as e:
                 print(f"IMX500Detector: Error - {e}")
@@ -201,7 +201,7 @@ class IMX500Detector:
         
         if np_outputs is None:
             return []
-        
+
         try:
             # Check format
             if len(np_outputs) >= 3:
@@ -209,6 +209,12 @@ class IMX500Detector:
                 scores = np_outputs[1][0]  # [N]
                 classes = np_outputs[2][0] # [N]
             else:
+                print(f"IMX500: Unexpected output format - got {len(np_outputs)} tensors, expected 3+")
+                return []
+
+            # Validate shapes match
+            if not (len(boxes) == len(scores) == len(classes)):
+                print(f"IMX500: Shape mismatch - boxes:{len(boxes)}, scores:{len(scores)}, classes:{len(classes)}")
                 return []
             
             detections = []
@@ -225,7 +231,8 @@ class IMX500Detector:
             
             return detections
             
-        except Exception:
+        except Exception as e:
+            print(f"IMX500: Parse error - {e}")
             return []
     
     def get_detections(self):
