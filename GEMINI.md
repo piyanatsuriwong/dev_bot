@@ -78,13 +78,13 @@ The server accepts text-based commands over TCP (Port 5000).
 ## Development Workflow
 
 ### Remote Development (SSH)
-*   **Host:** `192.168.1.47` (User: `pi`)
+*   **Host:** `192.168.1.43` (User: `pi`)
 *   **Key:** `C:\Users\piyanat\.ssh\id_ed25519_pi5`
 
 ### Common Commands
 **Deploy Code (Windows -> Pi):**
 ```powershell
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/numbot/*.py pi@192.168.1.47:/home/pi/numbot/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" D:/mobile/pi5/numbot/*.py pi@192.168.1.43:/home/pi/numbot/
 ```
 
 **Install Dependencies (Pi):**

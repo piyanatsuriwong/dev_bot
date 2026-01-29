@@ -25,7 +25,8 @@
       "WebFetch(domain:github.com)",
       "Bash(claude mcp add:*)",
       "Bash(ls:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "WebFetch(domain:seamonsters-2605.github.io)"
     ]
   }
 }

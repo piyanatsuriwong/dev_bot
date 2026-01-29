@@ -42,7 +42,7 @@ pip install -r requirements.txt
 ### Deploy ไปยัง Raspberry Pi
 ```powershell
 # จาก Windows
-scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" -r D:/mobile/pi5/picamera2_test pi@192.168.1.47:/home/pi/
+scp -i "C:\Users\piyanat\.ssh\id_ed25519_pi5" -r D:/mobile/pi5/picamera2_test pi@192.168.1.43:/home/pi/
 ```
 
 ### รันบน Raspberry Pi
