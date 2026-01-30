@@ -1,6 +1,9 @@
 {
     "camera_num": 0,
-    "resolution": [640, 480],
+    "resolution": [
+        640,
+        480
+    ],
     "detection_method": "hog",
     "detection_threshold": 0.5,
     "min_area": 3000,
@@ -17,9 +20,9 @@
         "port": 8080
     },
     "telegram": {
-        "enabled": false,
-        "bot_token": "YOUR_BOT_TOKEN_HERE",
-        "chat_id": "YOUR_CHAT_ID_HERE"
+        "enabled": true,
+        "bot_token": "7945579736:AAGGjQA2wUcAmq_o5D4Kz06MVHWuYBsDNoA",
+        "chat_id": "6436176975"
     },
     "database": "cctv_log.db"
 }
