@@ -1,0 +1,25 @@
+{
+    "camera_num": 0,
+    "resolution": [640, 480],
+    "detection_method": "hog",
+    "detection_threshold": 0.5,
+    "min_area": 3000,
+    "monitoring_enabled": false,
+    "monitoring_start": "18:00",
+    "monitoring_end": "08:00",
+    "alert_cooldown_seconds": 300,
+    "save_detections": true,
+    "detections_dir": "detections",
+    "max_detections_mb": 500,
+    "web_stream": {
+        "enabled": true,
+        "host": "0.0.0.0",
+        "port": 8080
+    },
+    "telegram": {
+        "enabled": false,
+        "bot_token": "YOUR_BOT_TOKEN_HERE",
+        "chat_id": "YOUR_CHAT_ID_HERE"
+    },
+    "database": "cctv_log.db"
+}

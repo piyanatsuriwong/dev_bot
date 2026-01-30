@@ -1,0 +1,8 @@
+# NumBot CCTV - Dependencies
+# picamera2 and opencv มักติดตั้งมากับ Raspberry Pi OS แล้ว
+
+opencv-python>=4.5.0
+numpy>=1.20.0
+flask>=2.0.0
+requests>=2.25.0
+# picamera2  # pre-installed on RPi OS
