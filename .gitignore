@@ -1,0 +1,4 @@
+face_recognition/venv/
+face_recognition/wheels/
+*.pyc
+__pycache__/
