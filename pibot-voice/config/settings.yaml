@@ -1,0 +1,52 @@
+# Pibot Voice Settings
+
+# Audio devices (auto-detect if empty)
+audio:
+  input_device: null   # ไมโครโฟน (null = auto)
+  output_device: null  # ลำโพง (null = auto)
+  sample_rate: 16000
+  channels: 1
+
+# Wake word detection
+wake_word:
+  enabled: true
+  phrase: "พีบอท"
+  # engine: openwakeword  # TODO: implement
+  engine: keyword  # simple keyword matching for now
+  sensitivity: 0.5
+
+# Speech-to-Text
+stt:
+  engine: whisper
+  model: base  # tiny, base, small, medium, large
+  language: th
+  # API mode (if local is too slow)
+  use_api: false
+  api_key: ${OPENAI_API_KEY}
+
+# Text-to-Speech  
+tts:
+  engine: edge  # edge (free), openai, elevenlabs
+  voice: th-TH-PremwadeeNeural  # Thai female voice
+  rate: "+0%"
+  volume: "+0%"
+  # Alternative voices:
+  # - th-TH-NiwatNeural (Thai male)
+  # - th-TH-PremwadeeNeural (Thai female)
+
+# Clawdbot integration
+clawdbot:
+  gateway_url: http://localhost:18789
+  session_key: agent:main:main
+  timeout: 60
+
+# Behavior
+behavior:
+  # ถ้า true จะฟังต่อเนื่องหลังตอบ
+  continuous_listen: true
+  # เวลารอหลังพูดจบก่อนส่ง (ms)
+  silence_threshold: 1500
+  # เสียงเมื่อเริ่มฟัง
+  listen_sound: true
+  # เสียงเมื่อประมวลผล
+  thinking_sound: true
